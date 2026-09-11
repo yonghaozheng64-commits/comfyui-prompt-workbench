@@ -12,6 +12,10 @@ Requires Python 3.10+ and a ComfyUI frontend exposing `extensionManager.register
 
 The optional `comfyui-lora-trigger-helper` plugin supplies curated LoRA groups and character output organization. Without it, this extension can compose prompts, manage templates and inspect LoRAs in the loaded graph; it does not automatically curate every file in your model folder. LoRA files and private metadata are not bundled.
 
+Install the companion [LoRA Trigger Helper](https://github.com/yonghaozheng64-commits/comfyui-lora-trigger-helper) for metadata editing, scanning and output organization. Manager users can install each repository via **Install via Git URL**, where permitted. Restart ComfyUI and use **Refresh LoRAs** for an offline scan. The helper starts without a personal database; create outfit groups and character labels for your own models. See its README for optional online hash lookup and local data backups.
+
+Both repositories are being submitted to the Manager catalog. A submitted PR does not mean the packages are already searchable; availability follows upstream review and catalog refresh.
+
 ## Use
 
 - Select a prompt/CLIP node on the canvas before writing a prompt.

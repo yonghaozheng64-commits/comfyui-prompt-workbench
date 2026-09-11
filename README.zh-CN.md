@@ -12,6 +12,10 @@
 
 `comfyui-lora-trigger-helper` 是可选配套插件，提供已策展的模型分组和人物输出归档；本仓库不包含该插件及个人 LoRA 数据库。未安装时仍可使用模板、提示词组合、队列预览及当前画布上的 LoRA。
 
+配套插件现已单独发布：[LoRA Trigger Helper](https://github.com/yonghaozheng64-commits/comfyui-lora-trigger-helper)。在允许 Git URL 安装的 Manager 中分别安装这两个仓库，重启后点击工作台的“刷新 LoRA”即可离线扫描自己的模型。首次为空数据库；完整服装分组、中文描述、人物标记需要自行编辑，联网查询也不保证这些内容齐全。
+
+两个插件将一并申请 Manager 列表收录；提交申请不代表已经可以搜索安装，仍须等待维护者审核和列表更新。
+
 ## 操作
 
 - 在画布选中提示词节点；批量自动切换还需选中人物 LoRA 和所需的固定 LoRA 加载节点。
