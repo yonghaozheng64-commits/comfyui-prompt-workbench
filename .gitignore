@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+node_modules/
+.cache/
+data/
+*.log
+web/edge_template_migration.json
+web/template_migration.html
