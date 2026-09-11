@@ -14,7 +14,7 @@
 
 配套插件现已单独发布：[LoRA Trigger Helper](https://github.com/yonghaozheng64-commits/comfyui-lora-trigger-helper)。在允许 Git URL 安装的 Manager 中分别安装这两个仓库，重启后点击工作台的“刷新 LoRA”即可离线扫描自己的模型。首次为空数据库；完整服装分组、中文描述、人物标记需要自行编辑，联网查询也不保证这些内容齐全。
 
-两个插件将一并申请 Manager 列表收录；提交申请不代表已经可以搜索安装，仍须等待维护者审核和列表更新。
+两个插件已一并提交 Manager 收录申请：[PR #3266](https://github.com/Comfy-Org/ComfyUI-Manager/pull/3266)。提交申请不代表已经可以搜索安装，仍须等待维护者审核和列表更新。
 
 ## 操作
 

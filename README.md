@@ -14,7 +14,7 @@ The optional `comfyui-lora-trigger-helper` plugin supplies curated LoRA groups a
 
 Install the companion [LoRA Trigger Helper](https://github.com/yonghaozheng64-commits/comfyui-lora-trigger-helper) for metadata editing, scanning and output organization. Manager users can install each repository via **Install via Git URL**, where permitted. Restart ComfyUI and use **Refresh LoRAs** for an offline scan. The helper starts without a personal database; create outfit groups and character labels for your own models. See its README for optional online hash lookup and local data backups.
 
-Both repositories are being submitted to the Manager catalog. A submitted PR does not mean the packages are already searchable; availability follows upstream review and catalog refresh.
+Both repositories have been submitted to the Manager catalog in [PR #3266](https://github.com/Comfy-Org/ComfyUI-Manager/pull/3266). A submitted PR does not mean the packages are already searchable; availability follows upstream review and catalog refresh.
 
 ## Use
 
