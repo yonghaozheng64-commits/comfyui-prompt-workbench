@@ -1,3 +1,4 @@
+import { currentLocale } from './i18n.js';
 const EXT = /\.(safetensors|ckpt|pt|bin|pth)$/i;
 
 const TERMS = [
@@ -182,7 +183,7 @@ export function automaticChineseName(value) {
 
 export function translatedLoraName(value, aliases = {}) {
   const key = normalizeLoraKey(value);
-  return String(aliases[key] || automaticChineseName(value)).trim();
+  return String(aliases[key] || (currentLocale() === 'zh-CN' ? automaticChineseName(value) : value)).trim();
 }
 
 export function bilingualLoraName(value, aliases = {}) {

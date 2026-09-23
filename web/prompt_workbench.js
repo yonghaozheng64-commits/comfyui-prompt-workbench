@@ -1,6 +1,6 @@
 import { loadState, clone, uid } from './state.js';
 import { storage } from './storage.js';
-import { t, prompt, confirm, LOCALE_KEY, currentLocale } from './i18n.js';
+import { t, format, prompt, confirm, LOCALE_KEY, currentLocale, initializeI18n } from './i18n.js';
 import { templateFillField, jobCount, jobAt } from './batch.js';
 import { downloadBackup, validateBackup } from './backup.js';
 import { app } from "../../../scripts/app.js";
@@ -163,7 +163,7 @@ function saveState() {
 }
 
 window.addEventListener("pagehide", persistState);
-window.addEventListener('pwb-storage-error', () => toast('保存失败', '浏览器存储不可用，请导出备份后再关闭页面。', 'error'));
+window.addEventListener('pwb-storage-error', () => toast(t("Save failed"), t("Browser storage is unavailable. Export a backup before closing this page."), 'error'));
 
 function displayAliases() {
   return { ...metadataAliases, ...state.loraAliases };
@@ -211,31 +211,6 @@ function installCharacterArchiveQueueHook() {
   };
 }
 
-async function organizeExistingOutput() {
-  const buttonNode = document.querySelector(".pwb-organize-output");
-  if (buttonNode) buttonNode.disabled = true;
-  try {
-    const previewResponse = await api.fetchApi("/lora-trigger-helper/character-archive/preview", { cache: "no-store" });
-    const preview = await previewResponse.json().catch(() => ({}));
-    if (!previewResponse.ok) throw new Error(preview.error || `HTTP ${previewResponse.status}`);
-    const top = Object.entries(preview.characters || {}).slice(0, 8).map(([name, count]) => `${name} ${count}`).join("、");
-    const message = `将移动 ${preview.total} 个图片/视频：已识别 ${preview.recognized} 个，未识别 ${preview.unknown} 个。\n\n主要目录：${top || "无"}\n\n未识别文件会进入“人物归档/_未识别人物”，确定继续吗？`;
-    if (!preview.total || !confirm(message)) return;
-    const response = await api.fetchApi("/lora-trigger-helper/character-archive/organize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-    toast("output 已按人物整理", `已移动 ${result.moved} 个资产；${Object.keys(result.characters || {}).length} 个人物目录`, "success");
-  } catch (error) {
-    toast("整理 output 失败", error.message || String(error), "error");
-  } finally {
-    if (buttonNode) buttonNode.disabled = false;
-  }
-}
-
 function ensureStyles() {
   if (document.querySelector('link[data-prompt-workbench="styles"]')) return;
   const link = document.createElement("link");
@@ -269,7 +244,7 @@ function extractPromptText(item) {
       if (seen.has(key)) continue;
       seen.add(key);
       const workflowNode = nodeMap.get(String(nodeId));
-      results.push({ node: workflowNode?.title || workflowNode?.type || node.class_type || `节点 ${nodeId}`, input: name, text });
+      results.push({ node: workflowNode?.title || workflowNode?.type || node.class_type || format("Node {0}", [nodeId]), input: name, text });
     }
   }
   return results;
@@ -284,24 +259,24 @@ function templateTaskSummary(item) {
   const character = normalizeText(metadata.character);
   if (!template && !character) return null;
   return {
-    template: template || "未命名模板",
-    character: character || "手工人物",
+    template: template || t("Untitled template"),
+    character: character || t("Manual character"),
   };
 }
 
 function taskTime(item) {
   const timestamp = item?.[3]?.create_time;
-  return timestamp ? new Date(timestamp).toLocaleString() : "时间未知";
+  return timestamp ? new Date(timestamp).toLocaleString() : t("Unknown time");
 }
 
 async function cancelPending(promptId) {
-  if (!confirm("确定取消这个排队任务吗？")) return;
+  if (!confirm(t("Cancel this queued task?"))) return;
   const response = await api.fetchApi("/queue", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ delete: [promptId] }),
   });
-  if (!response.ok) return toast("取消失败", await response.text(), "error");
+  if (!response.ok) return toast(t("Cancel failed"), await response.text(), "error");
   await renderQueue();
 }
 
@@ -313,7 +288,7 @@ async function cancelTaskForRedo(promptId, status) {
   });
   if (modern.ok) return;
   if (modern.status !== 404 && modern.status !== 405) {
-    throw new Error((await modern.text()) || `取消原任务失败（HTTP ${modern.status}）`);
+    throw new Error((await modern.text()) || format("Could not cancel the original task (HTTP {0})", [modern.status]));
   }
   const endpoint = status === "running" ? "/interrupt" : "/queue";
   const body = status === "running" ? { prompt_id: promptId } : { delete: [promptId] };
@@ -322,7 +297,7 @@ async function cancelTaskForRedo(promptId, status) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!fallback.ok) throw new Error((await fallback.text()) || `取消原任务失败（HTTP ${fallback.status}）`);
+  if (!fallback.ok) throw new Error((await fallback.text()) || format("Could not cancel the original task (HTTP {0})", [fallback.status]));
 }
 
 function nextRandomSeed() {
@@ -347,15 +322,15 @@ async function redoTaskAtFront(item, status, control) {
   const promptId = String(item?.[1] || "");
   const prompt = clone(item?.[2] || {});
   const extraData = clone(item?.[3] || {});
-  if (!promptId || !Object.keys(prompt).length) return toast("无法重做", "任务缺少原始 prompt 数据。", "error");
+  if (!promptId || !Object.keys(prompt).length) return toast(t("Cannot redo"), t("The original prompt data is missing."), "error");
   const changedSeeds = randomizePromptSeeds(prompt);
   const message = status === "running"
-    ? `这会中断当前任务，保留其他节点参数、随机更换 ${changedSeeds} 个种子并从头执行，且插到所有等待任务之前。确定重做吗？`
-    : `这会移除原排队任务，保留其他节点参数、随机更换 ${changedSeeds} 个种子并插到队首。确定重做吗？`;
+    ? format("Interrupt the current task, keep other parameters, randomize {0} seeds and restart ahead of queued tasks?", [changedSeeds])
+    : format("Replace the queued task, keep other parameters, randomize {0} seeds and queue the redo first?", [changedSeeds]);
   if (!confirm(message)) return;
   control.disabled = true;
   const oldLabel = control.textContent;
-  control.textContent = "正在插队…";
+  control.textContent = t("Moving to queue front…");
   let submittedPromptId = "";
   try {
     delete extraData.create_time;
@@ -376,8 +351,8 @@ async function redoTaskAtFront(item, status, control) {
     }
     submittedPromptId = String(result.prompt_id || "");
     await cancelTaskForRedo(promptId, status);
-    const seedDetail = changedSeeds ? `已更换 ${changedSeeds} 个种子` : "未发现可修改的种子输入";
-    toast("已插队重做", `新任务 ${submittedPromptId.slice(0, 12)} 已排到队首；${seedDetail}。`, "success");
+    const seedDetail = changedSeeds ? format("Changed {0} seeds", [changedSeeds]) : t("No editable seed inputs found");
+    toast(t("Redo queued first"), format("New task {0} queued first; {1}.", [submittedPromptId.slice(0, 12), seedDetail]), "success");
     await renderQueue();
   } catch (error) {
     if (submittedPromptId) {
@@ -389,7 +364,7 @@ async function redoTaskAtFront(item, status, control) {
         });
       } catch {}
     }
-    toast("插队重做失败", error.message, "error");
+    toast(t("Could not queue redo"), error.message, "error");
     control.disabled = false;
     control.textContent = oldLabel;
   }
@@ -438,7 +413,7 @@ function historyTaskForAsset(history, reference) {
 async function redoAssetAtFront(reference, control) {
   const oldLabel = control.textContent;
   control.disabled = true;
-  control.textContent = "读取中…";
+  control.textContent = t("Loading…");
   try {
     let sourcePromptId = "";
     let task;
@@ -454,7 +429,7 @@ async function redoAssetAtFront(reference, control) {
     const historyResponse = await api.fetchApi(sourcePromptId
       ? `/history/${encodeURIComponent(sourcePromptId)}`
       : "/history?max_items=2000");
-    if (!historyResponse.ok) throw new Error((await historyResponse.text()) || `读取历史任务失败（HTTP ${historyResponse.status}）`);
+    if (!historyResponse.ok) throw new Error((await historyResponse.text()) || format("Could not read task history (HTTP {0})", [historyResponse.status]));
     const history = await historyResponse.json();
     if (sourcePromptId) {
       task = historyTaskFromResponse(history, sourcePromptId);
@@ -463,10 +438,10 @@ async function redoAssetAtFront(reference, control) {
       sourcePromptId = String(matched.promptId || "");
       task = matched.task;
     }
-    if (!sourcePromptId) throw new Error("找不到这项资产对应的历史任务，历史记录可能已被清理。");
+    if (!sourcePromptId) throw new Error(t("The history entry for this asset was not found. It may have been cleared."));
     const prompt = clone(task?.[2] || {});
     const extraData = clone(task?.[3] || {});
-    if (!Object.keys(prompt).length) throw new Error("历史记录中缺少原始 prompt，可能已被清理。");
+    if (!Object.keys(prompt).length) throw new Error(t("The original prompt is missing from history."));
 
     const changedSeeds = randomizePromptSeeds(prompt);
     delete extraData.create_time;
@@ -474,7 +449,7 @@ async function redoAssetAtFront(reference, control) {
     extraData.prompt_workbench_redo_asset = assetId || `${reference.type}/${reference.subfolder}/${reference.filename}`;
     const payload = { prompt, extra_data: extraData, front: true };
     if (api.clientId) payload.client_id = api.clientId;
-    control.textContent = "插队中…";
+    control.textContent = t("Queuing first…");
     const submitResponse = await api.fetchApi("/prompt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -484,11 +459,11 @@ async function redoAssetAtFront(reference, control) {
     let result = {};
     try { result = text ? JSON.parse(text) : {}; } catch {}
     if (!submitResponse.ok || result.error) {
-      throw new Error(result.error?.message || result.error?.details || text || `提交失败（HTTP ${submitResponse.status}）`);
+      throw new Error(result.error?.message || result.error?.details || text || format("Submission failed (HTTP {0})", [submitResponse.status]));
     }
-    const seedDetail = changedSeeds ? `已随机更换 ${changedSeeds} 个种子` : "未发现数字种子输入";
-    toast("资产已插队重做", `新任务 ${String(result.prompt_id || "").slice(0, 12)} 已排到队首；${seedDetail}。`, "success");
-    control.textContent = "已提交";
+    const seedDetail = changedSeeds ? format("Randomized {0} seeds", [changedSeeds]) : t("No numeric seed inputs found");
+    toast(t("Asset redo queued first"), format("New task {0} queued first; {1}.", [String(result.prompt_id || "").slice(0, 12), seedDetail]), "success");
+    control.textContent = t("Submitted");
     setTimeout(() => {
       if (control.isConnected) {
         control.disabled = false;
@@ -496,7 +471,7 @@ async function redoAssetAtFront(reference, control) {
       }
     }, 1800);
   } catch (error) {
-    toast("资产重做失败", error.message, "error");
+    toast(t("Asset redo failed"), error.message, "error");
     control.disabled = false;
     control.textContent = oldLabel;
   }
@@ -525,9 +500,9 @@ function decorateAssetRedoCards(root = document) {
     card.dataset.pwbAssetRedo = signature;
     card.classList.add("pwb-asset-redo-host");
     if (getComputedStyle(card).position === "static") card.style.position = "relative";
-    const redo = el("button", "pwb-asset-redo", "↻ 重做");
+    const redo = el("button", "pwb-asset-redo", t("↻ Redo"));
     redo.type = "button";
-    redo.title = "恢复这张资产的原始工作流，随机更换种子并插到队首";
+    redo.title = t("Restore this asset's workflow, randomize seeds and queue it first");
     for (const eventName of ["pointerdown", "mousedown", "dblclick", "contextmenu"]) {
       redo.addEventListener(eventName, (event) => {
         event.preventDefault();
@@ -559,7 +534,7 @@ function startAssetRedoObserver() {
 function renderTask(item, status, index) {
   const card = el("article", "pwb-task");
   const head = el("div", "pwb-task-head");
-  const title = el("div", "pwb-task-title", status === "running" ? "运行中" : `排队 #${index + 1}`);
+  const title = el("div", "pwb-task-title", status === "running" ? t("Running") : format("Queued #{0}", [index + 1]));
   title.prepend(el("span", `pwb-badge ${status}`, status === "running" ? "RUNNING" : "PENDING"));
   head.append(title, el("time", "pwb-time", taskTime(item)));
   card.append(head);
@@ -567,9 +542,9 @@ function renderTask(item, status, index) {
   if (templateTask) {
     const summary = el("div", "pwb-task-template-summary");
     summary.append(
-      el("div", "pwb-task-template-row", "模板工作流"),
+      el("div", "pwb-task-template-row", t("Template workflow")),
       el("strong", "pwb-task-template-name", templateTask.template),
-      el("span", "pwb-task-template-character", `LoRA 人物：${templateTask.character}`)
+      el("span", "pwb-task-template-character", format("LoRA character: {0}", [templateTask.character]))
     );
     card.append(summary);
   } else {
@@ -578,21 +553,21 @@ function renderTask(item, status, index) {
       const block = el("div", "pwb-prompt-block");
       block.append(el("div", "pwb-prompt-label", `${entry.node} · ${entry.input}`));
       const content = el("div", "pwb-prompt-text", entry.text);
-      content.title = "点击复制";
+      content.title = t("Click to copy");
       content.addEventListener("click", async () => {
         await navigator.clipboard.writeText(entry.text);
-        toast("已复制", entry.node);
+        toast(t("Copied"), entry.node);
       });
       block.append(content);
       card.append(block);
     }
-    if (!texts.length) card.append(el("div", "pwb-empty-inline", "没有识别到文本提示词；该任务可能只修改了参数。"));
+    if (!texts.length) card.append(el("div", "pwb-empty-inline", t("No text prompts found; this task may only change parameters.")));
   }
   const foot = el("div", "pwb-task-foot");
   foot.append(el("code", "pwb-task-id", String(item?.[1] || "").slice(0, 12)));
-  const redo = button("插队重做", () => redoTaskAtFront(item, status, redo), "primary subtle");
+  const redo = button(t("Redo next"), () => redoTaskAtFront(item, status, redo), "primary subtle");
   foot.append(redo);
-  if (status === "pending") foot.append(button("取消任务", () => cancelPending(item[1]), "danger subtle"));
+  if (status === "pending") foot.append(button(t("Cancel task"), () => cancelPending(item[1]), "danger subtle"));
   card.append(foot);
   return card;
 }
@@ -623,26 +598,26 @@ async function renderQueueOnce() {
     const pending = [...(data.queue_pending || [])].sort((a, b) => Number(a?.[0] || 0) - Number(b?.[0] || 0));
     queueRoot.innerHTML = "";
     const summary = el("div", "pwb-queue-summary");
-    summary.append(el("span", "", `运行中 ${running.length}`), el("span", "", `等待中 ${pending.length}`), button("刷新", renderQueue, "subtle"));
+    summary.append(el("span", "", format("Running {0}", [running.length])), el("span", "", format("Pending {0}", [pending.length])), button(t("Refresh"), renderQueue, "subtle"));
     queueRoot.append(summary);
     running.forEach((item, index) => queueRoot.append(renderTask(item, "running", index)));
     pending.slice(0, queueVisibleLimit).forEach((item, index) => queueRoot.append(renderTask(item, "pending", index)));
     if (pending.length > queueVisibleLimit) {
       const more = el("div", "pwb-queue-more");
       more.append(
-        el("span", "pwb-muted", `已显示 ${queueVisibleLimit} / ${pending.length} 个等待任务`),
-        button(`继续显示 ${Math.min(QUEUE_PAGE_SIZE, pending.length - queueVisibleLimit)} 个`, () => {
+        el("span", "pwb-muted", format("Showing {0} of {1} pending tasks", [queueVisibleLimit, pending.length])),
+        button(format("Show {0} more", [Math.min(QUEUE_PAGE_SIZE, pending.length - queueVisibleLimit)]), () => {
           queueVisibleLimit += QUEUE_PAGE_SIZE;
           renderQueue();
         }, "primary subtle")
       );
       queueRoot.append(more);
     }
-    if (!running.length && !pending.length) queueRoot.append(el("div", "pwb-empty", "队列是空的。提交任务后，可在这里查看每项任务的提示词。"));
+    if (!running.length && !pending.length) queueRoot.append(el("div", "pwb-empty", t("The queue is empty. Submitted tasks and their prompts appear here.")));
   } catch (error) {
     if (targetRoot !== queueRoot || !targetRoot?.isConnected) return;
     queueRoot.innerHTML = "";
-    queueRoot.append(el("div", "pwb-empty", `读取队列失败：${error.message}`));
+    queueRoot.append(el("div", "pwb-empty", format("Could not read queue: {0}", [error.message])));
   }
 }
 
@@ -652,7 +627,7 @@ function assembledText() {
 
 function addSelection(type, label, text, extra = {}) {
   const value = normalizeText(text);
-  if (!value) return toast("内容为空", "没有可加入的提示词。", "warn");
+  if (!value) return toast(t("Empty content"), t("There are no prompts to add."), "warn");
   state.selections.push({ id: uid(), type, label, text: value, ...extra });
   saveState();
   renderSelections();
@@ -676,11 +651,11 @@ function renderSelections() {
       renderSelections();
     });
     const head = el("div", "pwb-selection-head");
-    head.append(el("strong", "", item.type === "lora" ? `LoRA：${item.label}` : item.label || "完整提示词"));
+    head.append(el("strong", "", item.type === "lora" ? `LoRA：${item.label}` : item.label || t("Complete prompt")));
     const actions = el("div", "pwb-actions compact");
     actions.append(
-      button("编辑", () => {
-        const next = prompt("编辑完整内容", item.text);
+      button(t("Edit"), () => {
+        const next = prompt(t("Edit complete content"), item.text);
         if (next?.trim()) {
           item.text = next.trim();
           saveState();
@@ -695,12 +670,12 @@ function renderSelections() {
     );
     head.append(actions);
     const body = el("div", "pwb-selection-text", item.text);
-    body.title = "双击编辑";
+    body.title = t("Double-click to edit");
     body.addEventListener("dblclick", () => actions.firstChild.click());
     card.append(head, body);
     selectionsRoot.append(card);
   }
-  if (!state.selections.length) selectionsRoot.append(el("div", "pwb-empty-inline", "这里只显示已选择的 LoRA 整组触发词，或你加入的完整提示词。"));
+  if (!state.selections.length) selectionsRoot.append(el("div", "pwb-empty-inline", t("Selected LoRA trigger groups and complete prompts appear here.")));
   outputArea.value = assembledText();
 }
 
@@ -715,14 +690,14 @@ function selectedTextWidget() {
 
 function writeToSelectedNode() {
   const target = selectedTextWidget();
-  if (!target) return toast("没有可写入的节点", "请先选中一个含文本或提示词输入框的节点。", "warn");
+  if (!target) return toast(t("No writable node"), t("Select a node with a text or prompt input first."), "warn");
   const text = assembledText();
-  if (!text) return toast("上方内容为空", "请先选择 LoRA 词组或加入完整提示词。", "warn");
+  if (!text) return toast(t("No selected content"), t("Select LoRA triggers or add a complete prompt first."), "warn");
   target.widget.value = text;
   target.widget.callback?.(text, app.canvas, target.node, target.widget);
   target.node.graph?.change?.();
   app.canvas?.setDirty?.(true, true);
-  toast("已写入提示词", target.node.title || target.node.type, "success");
+  toast(t("Prompt written"), target.node.title || target.node.type, "success");
 }
 
 function activeTemplate() {
@@ -748,7 +723,7 @@ function selectTemplateField(fieldId) {
     row.classList.toggle("active", row.dataset.fieldId === fieldId);
   }
   for (const fillButton of templateRoot?.querySelectorAll("[data-fill-field]") || []) {
-    fillButton.textContent = fillButton.dataset.fillField === fieldId ? "当前填充位" : "选作填充位";
+    fillButton.textContent = fillButton.dataset.fillField === fieldId ? t("Current fill target") : t("Use as fill target");
   }
   return true;
 }
@@ -763,17 +738,17 @@ function moveTemplateField(fromIndex, toIndex) {
 }
 
 function importTemplatesFromJson() {
-  const raw = prompt("粘贴从其他浏览器导出的模板 JSON", "");
+  const raw = prompt(t("Paste template JSON exported from another browser"), "");
   if (raw === null) return;
   try {
     const parsed = JSON.parse(raw);
     const incoming = Array.isArray(parsed) ? parsed : parsed?.templates;
-    if (!Array.isArray(incoming) || !incoming.length) throw new Error("没有读取到模板数组");
+    if (!Array.isArray(incoming) || !incoming.length) throw new Error(t("No template array found"));
     const normalized = incoming.map((template, index) => {
-      if (!template || typeof template !== "object") throw new Error(`第 ${index + 1} 个模板格式无效`);
+      if (!template || typeof template !== "object") throw new Error(format("Template {0} has an invalid format", [index + 1]));
       const name = String(template.name || "").trim();
       const fields = Array.isArray(template.fields) ? template.fields.filter((field) => field && typeof field === "object") : [];
-      if (!name || !fields.length) throw new Error(`第 ${index + 1} 个模板缺少名称或字段`);
+      if (!name || !fields.length) throw new Error(format("Template {0} is missing a name or fields", [index + 1]));
       return {
         ...clone(template),
         id: String(template.id || uid()),
@@ -794,9 +769,9 @@ function importTemplatesFromJson() {
     storage.setItem(STORAGE_KEY, JSON.stringify(state));
     renderTemplates();
     renderBatchPanel();
-    toast("模板导入完成", `导入 ${normalized.length} 个，当前共 ${state.templates.length} 个模板`, "success");
+    toast(t("Templates imported"), format("Imported {0}; {1} templates total", [normalized.length, state.templates.length]), "success");
   } catch (error) {
-    toast("模板导入失败", error.message || String(error), "error");
+    toast(t("Template import failed"), error.message || String(error), "error");
   }
 }
 
@@ -804,9 +779,9 @@ async function exportTemplatesToClipboard() {
   const text = JSON.stringify({ format: "prompt-workbench-templates-v1", templates: state.templates }, null, 2);
   try {
     await navigator.clipboard.writeText(text);
-    toast("模板已复制", `${state.templates.length} 个模板已复制到剪贴板`, "success");
+    toast(t("Templates copied"), format("Copied {0} templates to clipboard", [state.templates.length]), "success");
   } catch {
-    prompt("复制下面的模板 JSON", text);
+    prompt(t("Copy the template JSON below"), text);
   }
 }
 
@@ -828,30 +803,30 @@ function renderTemplates() {
   });
   toolbar.append(
     select,
-    button("新建", () => {
-      const name = prompt("新模板名称", "我的模板");
+    button(t("New"), () => {
+      const name = prompt(t("New template name"), t("My template"));
       if (!name?.trim()) return;
-      const template = { id: uid(), name: name.trim(), fields: [{ id: uid(), name: "可变内容", value: "", fixed: false }] };
+      const template = { id: uid(), name: name.trim(), fields: [{ id: uid(), name: t("Variable content"), value: "", fixed: false }] };
       state.templates.push(template);
       activeTemplateId = template.id;
       activeFieldId = template.fields[0].id;
       saveState();
       renderTemplates();
     }, "subtle"),
-    button("重命名", () => {
+    button(t("Rename"), () => {
       const template = activeTemplate();
-      const name = prompt("模板名称", template.name);
+      const name = prompt(t("Template name"), template.name);
       if (name?.trim()) {
         template.name = name.trim();
         saveState();
         renderTemplates();
       }
     }, "subtle"),
-    button("导入模板", importTemplatesFromJson, "subtle"),
-    button("复制导出", exportTemplatesToClipboard, "subtle"),
-    button("删除", () => {
-      if (state.templates.length <= 1) return toast("不能删除", "至少保留一个模板。", "warn");
-      if (!confirm(`删除模板“${activeTemplate().name}”？`)) return;
+    button(t("Import templates"), importTemplatesFromJson, "subtle"),
+    button(t("Copy export"), exportTemplatesToClipboard, "subtle"),
+    button(t("Delete"), () => {
+      if (state.templates.length <= 1) return toast(t("Cannot delete"), t("Keep at least one template."), "warn");
+      if (!confirm(format("Delete template '{0}'?", [activeTemplate().name]))) return;
       state.templates = state.templates.filter((template) => template.id !== activeTemplateId);
       state.batchTemplateIds = state.batchTemplateIds.filter((id) => id !== activeTemplateId);
       activeTemplateId = state.templates[0].id;
@@ -863,10 +838,10 @@ function renderTemplates() {
   );
   templateRoot.append(toolbar);
 
-  const hint = el("div", "pwb-hint", "点选一个可变字段后，可在下方 LoRA 库点击“填入模板”。固定字段在清空变量时会保留。所有内容都可直接修改。");
+  const hint = el("div", "pwb-hint", t("Select a variable field, then fill it from the LoRA library. Clearing variables preserves fixed fields. All fields can be edited."));
   templateRoot.append(hint);
   const fixedLoras = el("div", "pwb-template-fixed-loras");
-  fixedLoras.append(el("div", "pwb-label", "这个模板固定使用的 LoRA（按顺序对应固定 LoRA 加载节点）"));
+  fixedLoras.append(el("div", "pwb-label", t("Fixed LoRAs for this template (ordered to match loader nodes)")));
   const fixedLoraChips = el("div", "pwb-batch-selected");
   for (const file of activeTemplate().fixedLoraFiles || []) {
     fixedLoraChips.append(button(`${translatedLoraName(file, displayAliases())} ×`, () => {
@@ -876,7 +851,7 @@ function renderTemplates() {
       renderLoraLibrary();
     }, "library-chip lora"));
   }
-  if (!(activeTemplate().fixedLoraFiles || []).length) fixedLoraChips.append(el("span", "pwb-muted", "暂无；可从下方 LoRA 库加入当前模板。"));
+  if (!(activeTemplate().fixedLoraFiles || []).length) fixedLoraChips.append(el("span", "pwb-muted", t("None yet. Add fixed LoRAs to this template from the library.")));
   fixedLoras.append(fixedLoraChips);
   templateRoot.append(fixedLoras);
   const fields = el("div", "pwb-template-fields advanced");
@@ -885,7 +860,7 @@ function renderTemplates() {
     row.dataset.fieldId = field.id;
     row.addEventListener("click", (event) => {
       if (event.target.closest("button,input,textarea,label")) return;
-      if (!selectTemplateField(field.id)) toast("这是固定字段", "取消固定后才能设为 LoRA 填充位。", "warn");
+      if (!selectTemplateField(field.id)) toast(t("This field is fixed"), t("Unfix the field before using it as a LoRA fill target."), "warn");
     });
     row.addEventListener("dragover", (event) => event.preventDefault());
     row.addEventListener("drop", (event) => {
@@ -896,7 +871,7 @@ function renderTemplates() {
     });
     const head = el("div", "pwb-template-field-head");
     const grip = el("span", "pwb-field-grip", "⠿");
-    grip.title = "拖拽调整字段顺序";
+    grip.title = t("Drag to reorder fields");
     grip.draggable = true;
     grip.addEventListener("dragstart", (event) => {
       event.dataTransfer.setData("application/x-pwb-template-field", field.id);
@@ -904,7 +879,7 @@ function renderTemplates() {
     });
     const name = el("input", "pwb-input");
     name.value = field.name;
-    name.placeholder = t("字段名称");
+    name.placeholder = t("Field name");
     name.addEventListener("input", () => { field.name = name.value; saveState(); });
     const fixedLabel = el("label", "pwb-fixed-label");
     const fixed = el("input", "");
@@ -914,11 +889,11 @@ function renderTemplates() {
       field.fixed = fixed.checked;
       saveState();
     });
-    fixedLabel.append(fixed, document.createTextNode("固定"));
+    fixedLabel.append(fixed, document.createTextNode(t("Fixed")));
     head.append(grip, name, fixedLabel);
     const controls = el("div", "pwb-template-field-controls");
-    const fillButton = button(field.id === activeFieldId ? "当前填充位" : "选作填充位", () => {
-      if (field.fixed) return toast("这是固定字段", "先取消“固定”，再让 LoRA 自动替换。", "warn");
+    const fillButton = button(field.id === activeFieldId ? t("Current fill target") : t("Use as fill target"), () => {
+      if (field.fixed) return toast(t("This field is fixed"), t("Unfix this field before allowing automatic LoRA replacement."), "warn");
       selectTemplateField(field.id);
     }, "subtle fill-field");
     fillButton.dataset.fillField = field.id;
@@ -936,32 +911,32 @@ function renderTemplates() {
     );
     const value = el("textarea", "pwb-input pwb-field-value");
     value.value = field.value;
-    value.placeholder = t("手工输入，或从 LoRA 自动填充");
+    value.placeholder = t("Type here or fill from a LoRA");
     value.addEventListener("input", () => {
       field.value = value.value;
       field.loraFile = undefined;
       saveState();
     });
     row.append(head, controls, value);
-    if (field.loraFile) row.append(el("div", "pwb-field-source", `来自 LoRA：${bilingualLoraName(field.loraFile, displayAliases())}`));
+    if (field.loraFile) row.append(el("div", "pwb-field-source", format("From LoRA: {0}", [bilingualLoraName(field.loraFile, displayAliases())])));
     fields.append(row);
   }
   templateRoot.append(fields);
   const actions = el("div", "pwb-actions wrap");
   actions.append(
-    button("＋ 添加字段", () => {
-      const field = { id: uid(), name: "新字段", value: "", fixed: false };
+    button(t("+ Add field"), () => {
+      const field = { id: uid(), name: t("New field"), value: "", fixed: false };
       activeTemplate().fields.push(field);
       activeFieldId = field.id;
       saveState();
       renderTemplates();
     }, "subtle"),
-    button("清空可变项", () => {
+    button(t("Clear variable fields"), () => {
       activeTemplate().fields.forEach((field) => { if (!field.fixed) { field.value = ""; field.loraFile = undefined; } });
       saveState();
       renderTemplates();
     }, "subtle"),
-    button("生成完整提示词", () => addSelection("prompt", `模板：${activeTemplate().name}`, templateText(activeTemplate())), "primary"),
+    button(t("Build prompt"), () => addSelection("prompt", format("Template: {0}", [activeTemplate().name]), templateText(activeTemplate())), "primary"),
   );
   templateRoot.append(actions);
 }
@@ -998,7 +973,7 @@ function loraBaseModel(item) {
   const candidates = [item?.baseModel, item?.base_model, item?.civitai?.baseModel, item?.civitai?.base_model];
   return candidates
     .map((value) => String(value || "").trim())
-    .find((value) => value && !/^(unknown|none|null|n\/a)$/i.test(value)) || "未知模型";
+    .find((value) => value && !/^(unknown|none|null|n\/a)$/i.test(value)) || t("Unknown model");
 }
 
 async function loadLoras() {
@@ -1031,62 +1006,17 @@ async function loadLorasOnce() {
       metadataAliases[normalizeLoraKey(item.file)] = String(item.displayName).trim();
       continue;
     }
-    const translatedFile = automaticChineseName(item.file);
+    const translatedFile = currentLocale() === 'zh-CN' ? automaticChineseName(item.file) : item.file;
     if (!/[\u3400-\u9fff]/.test(translatedFile) && item.name && normalizeLoraKey(item.name) !== normalizeLoraKey(item.file)) {
-      metadataAliases[normalizeLoraKey(item.file)] = automaticChineseName(item.name);
+      metadataAliases[normalizeLoraKey(item.file)] = currentLocale() === 'zh-CN' ? automaticChineseName(item.name) : item.name;
     }
   }
   for (const item of byKey.values()) if (looksLikeLora(item.file)) knownLoraFiles.add(item.file);
-  loraItems = [...byKey.values()].sort((a, b) => translatedLoraName(a.file, displayAliases()).localeCompare(translatedLoraName(b.file, displayAliases()), "zh-CN"));
+  loraItems = [...byKey.values()].sort((a, b) => translatedLoraName(a.file, displayAliases()).localeCompare(translatedLoraName(b.file, displayAliases()), currentLocale()));
   loraLoaded = byKey.size > 0;
   renderBatchPanel();
 }
 
-async function deleteLoraFile(item) {
-  const file = item.file;
-  if (!confirm(`\u786e\u5b9a\u5c06 LoRA\u201c${file}\u201d\u79fb\u81f3\u56de\u6536\u7ad9\u5417\uff1f`)) return;
-  try {
-    let response = await api.fetchApi("/lora-trigger-helper/remove", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file }),
-    });
-    if (response.status === 404 || response.status === 405) {
-      response = await api.fetchApi("/lora-trigger-helper/delete", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file }),
-      });
-    }
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const detail = response.status === 405 ? "\u5220\u9664\u540e\u7aef\u5c1a\u672a\u52a0\u8f7d\uff0c\u8bf7\u5b8c\u6574\u91cd\u542f ComfyUI" : (result.error || `HTTP ${response.status}`);
-      throw new Error(detail);
-    }
-
-    const key = normalizeLoraKey(file);
-    delete state.loraAliases[key];
-    delete state.loraTriggers[key];
-    delete state.loraTriggerSelections[key];
-    delete state.loraGroupSelections[key];
-    state.batchLoraKeys = state.batchLoraKeys.filter((value) => normalizeLoraKey(value) !== key);
-    state.batchLoraEntries = state.batchLoraEntries.filter((entry) => normalizeLoraKey(entry.key) !== key);
-    for (const template of state.templates) {
-      template.fixedLoraFiles = (template.fixedLoraFiles || []).filter((value) => normalizeLoraKey(value) !== key);
-    }
-    for (const value of [...knownLoraFiles]) {
-      if (normalizeLoraKey(value) === key) knownLoraFiles.delete(value);
-    }
-    saveState();
-    loraLoaded = false;
-    loraItems = [];
-    await renderLoraLibrary();
-    renderTemplates();
-    toast("\u5df2\u79fb\u81f3\u56de\u6536\u7ad9", file, "success");
-  } catch (error) {
-    toast("\u5220\u9664 LoRA \u5931\u8d25", error.message || String(error), "error");
-  }
-}
 
 function wordsForLora(item) {
   const override = state.loraTriggers[normalizeLoraKey(item.file)];
@@ -1099,73 +1029,74 @@ function wordsInGroup(group) {
 }
 
 const GROUP_CATEGORIES = [
-  { name: "\u89d2\u8272\u5916\u89c2", test: /\b(1girl|1boy|woman|man|female|male|hair|eyes?|breasts?|skin|face|girl|boy)\b/i, note: "\u89d2\u8272\u8eab\u4efd\u3001\u53d1\u8272\u3001\u77b3\u8272\u4e0e\u8eab\u4f53\u7279\u5f81" },
-  { name: "\u670d\u88c5\u9020\u578b", test: /\b(dress|shirt|uniform|jacket|coat|skirt|bikini|swimsuit|kimono|apron|clothes|outfit|sleeves?|necktie|bowtie|leotard)\b/i, note: "\u670d\u88c5\u3001\u914d\u9970\u4e0e\u7279\u5b9a\u9020\u578b" },
-  { name: "\u52a8\u4f5c\u8868\u73b0", test: /\b(pose|sex|fuck|blowjob|titfuck|doggy|missionary|cowgirl|dance|grabbing|motion|movement|swaying|bouncing)\b/i, note: "\u52a8\u4f5c\u3001\u59ff\u52bf\u4e0e\u8eab\u4f53\u8868\u73b0" },
-  { name: "\u89c6\u9891\u8fd0\u52a8", test: /\b(video|animation|animate|temporal|camera|i2v|t2v|frames?|relight|lighting)\b/i, note: "\u89c6\u9891\u65f6\u5e8f\u3001\u8fd0\u52a8\u7a33\u5b9a\u6027\u4e0e\u955c\u5934\u8868\u73b0" },
-  { name: "\u753b\u98ce\u6837\u5f0f", test: /\b(style|lineart|anime|comic|illustration|pixel|realistic|photorealistic|shading)\b/i, note: "\u542f\u7528\u7279\u5b9a\u753b\u98ce\u3001\u7ebf\u7a3f\u6216\u6e32\u67d3\u7279\u5f81" },
-  { name: "\u753b\u8d28\u589e\u5f3a", test: /\b(quality|detailed|details?|masterpiece|aesthetic|sharp|focus|texture|refined|clean)\b/i, note: "\u63d0\u5347\u7ec6\u8282\u3001\u6e05\u6670\u5ea6\u4e0e\u6574\u4f53\u753b\u8d28" },
+  { name: t("Character appearance"), test: /\b(1girl|1boy|woman|man|female|male|hair|eyes?|breasts?|skin|face|girl|boy)\b/i, note: t("Identity, hair, eyes and physical traits") },
+  { name: t("Outfit"), test: /\b(dress|shirt|uniform|jacket|coat|skirt|bikini|swimsuit|kimono|apron|clothes|outfit|sleeves?|necktie|bowtie|leotard)\b/i, note: t("Clothes, accessories and outfit details") },
+  { name: t("Action"), test: /\b(pose|sex|fuck|blowjob|titfuck|doggy|missionary|cowgirl|dance|grabbing|motion|movement|swaying|bouncing)\b/i, note: t("Actions, poses and movement") },
+  { name: t("Video motion"), test: /\b(video|animation|animate|temporal|camera|i2v|t2v|frames?|relight|lighting)\b/i, note: t("Temporal consistency, movement and camera") },
+  { name: t("Art style"), test: /\b(style|lineart|anime|comic|illustration|pixel|realistic|photorealistic|shading)\b/i, note: t("Art style, linework and rendering") },
+  { name: t("Quality enhancement"), test: /\b(quality|detailed|details?|masterpiece|aesthetic|sharp|focus|texture|refined|clean)\b/i, note: t("Detail, sharpness and overall quality") },
 ];
 
 const TRIGGER_LABELS = {
-  "nakiri erina": "\u8599\u5207\u7ed8\u91cc\u5948 / Erina",
-  "yukihira souma": "\u5e78\u5e73\u521b\u771f / Soma",
-  "arato hisako": "\u65b0\u6237\u7eef\u6c99\u5b50 / Hisako",
-  tootsukischool: "\u8fdc\u6708\u5b66\u56ed\u6821\u670d",
-  tootsukisummer: "\u8fdc\u6708\u590f\u5b63\u6821\u670d",
-  "main thighhighs": "\u4e3b\u9020\u578b\uff08\u8fc7\u819d\u889c\uff09",
-  "cooking-uniform": "\u53a8\u5e08\u670d",
-  d0ubl3_bj: "\u53cc\u4eba\u53e3\u4ea4",
-  d0gg1e: "\u540e\u5165\u4f53\u4f4d",
-  m15510n4ry: "\u4f20\u6559\u58eb\u4f53\u4f4d",
-  c0wg1rl: "\u5973\u4e0a\u4f4d",
-  bl0wj0b: "\u53e3\u4ea4",
-  sbevedef: "EVE \u9ed8\u8ba4\u9020\u578b",
-  sbevealt: "EVE \u66ff\u6362\u9020\u578b",
+  "nakiri erina": t("Erina Nakiri"),
+  "yukihira souma": t("Soma Yukihira"),
+  "arato hisako": t("Hisako Arato"),
+  tootsukischool: t("Totsuki school uniform"),
+  tootsukisummer: t("Totsuki summer uniform"),
+  "main thighhighs": t("Main outfit (thigh-highs)"),
+  "cooking-uniform": t("Chef uniform"),
+  d0ubl3_bj: t("Double oral mode"),
+  d0gg1e: t("Rear-entry mode"),
+  m15510n4ry: t("Missionary mode"),
+  c0wg1rl: t("Cowgirl mode"),
+  bl0wj0b: t("Oral mode"),
+  sbevedef: t("EVE default outfit"),
+  sbevealt: t("EVE alternate outfit"),
 };
 
 const TRIGGER_NOTES = {
-  d0ubl3_bj: "\u53cc\u5bf9\u4e00\u53e3\u4ea4\u52a8\u4f5c\u6a21\u5f0f",
-  d0gg1e: "\u540e\u5165\u4f53\u4f4d\u52a8\u4f5c\u6a21\u5f0f",
-  m15510n4ry: "\u4f20\u6559\u58eb\u4f53\u4f4d\u52a8\u4f5c\u6a21\u5f0f",
-  c0wg1rl: "\u5973\u4e0a\u4f4d\u52a8\u4f5c\u6a21\u5f0f",
-  bl0wj0b: "\u53e3\u4ea4\u52a8\u4f5c\u6a21\u5f0f",
-  sbevedef: "EVE \u9ed8\u8ba4\u670d\u88c5\u4e0e\u5916\u89c2",
-  sbevealt: "EVE \u66ff\u6362\u670d\u88c5\u4e0e\u5916\u89c2",
+  d0ubl3_bj: t("Double oral action mode"),
+  d0gg1e: t("Rear-entry action mode"),
+  m15510n4ry: t("Missionary action mode"),
+  c0wg1rl: t("Cowgirl action mode"),
+  bl0wj0b: t("Oral action mode"),
+  sbevedef: t("EVE default outfit and appearance"),
+  sbevealt: t("EVE alternate outfit and appearance"),
 };
 
 function groupCategories(words) {
   const text = words.join(" ");
-  return GROUP_CATEGORIES.filter((category) => category.test.test(text));
+  return GROUP_CATEGORIES.filter((category) => category.test.test(text))
+    .map(category => ({ ...category, name: t(category.name), note: t(category.note) }));
 }
 
 const VISUAL_TRAITS = [
-  ["parted bangs", "\u4e2d\u5206\u5218\u6d77"], ["blunt bangs", "\u9f50\u5218\u6d77"], ["hair between eyes", "\u773c\u95f4\u53d1"],
-  ["twin braids", "\u53cc\u8fab\u5b50"], ["side ponytail", "\u4fa7\u9a6c\u5c3e"], ["ponytail", "\u9a6c\u5c3e"], ["braid", "\u7f16\u53d1"],
-  ["long hair", "\u957f\u53d1"], ["short hair", "\u77ed\u53d1"], ["medium hair", "\u4e2d\u957f\u53d1"],
-  ["black hair", "\u9ed1\u53d1"], ["brown hair", "\u68d5\u53d1"], ["blonde hair", "\u91d1\u53d1"], ["white hair", "\u767d\u53d1"],
-  ["red hair", "\u7ea2\u53d1"], ["blue hair", "\u84dd\u53d1"], ["green hair", "\u7eff\u53d1"], ["pink hair", "\u7c89\u53d1"],
-  ["purple hair", "\u7d2b\u53d1"], ["orange hair", "\u6a59\u53d1"], ["grey hair", "\u7070\u53d1"], ["aqua hair", "\u6c34\u8272\u5934\u53d1"],
-  ["black eyes", "\u9ed1\u773c"], ["brown eyes", "\u68d5\u773c"], ["blue eyes", "\u84dd\u773c"], ["green eyes", "\u7eff\u773c"],
-  ["red eyes", "\u7ea2\u773c"], ["pink eyes", "\u7c89\u773c"], ["purple eyes", "\u7d2b\u773c"], ["yellow eyes", "\u9ec4\u773c"],
-  ["dark-skinned female", "\u6df1\u8272\u76ae\u80a4"], ["dark-skinned male", "\u6df1\u8272\u76ae\u80a4"], ["large breasts", "\u4e30\u6ee1\u80f8\u90e8"],
-  ["cropped shirt", "\u77ed\u6b3e\u4e0a\u8863"], ["ribbed shirt", "\u7f57\u7eb9\u4e0a\u8863"], ["white shirt", "\u767d\u8272\u4e0a\u8863"],
-  ["cleavage cutout", "\u80f8\u53e3\u9542\u7a7a"], ["puffy long sleeves", "\u6ce1\u6ce1\u957f\u8896"], ["puffy sleeves", "\u6ce1\u6ce1\u8896"],
-  ["white skirt", "\u767d\u8272\u88d9\u5b50"], ["long skirt", "\u957f\u88d9"], ["pleated skirt", "\u767e\u8936\u88d9"], ["plaid skirt", "\u683c\u7eb9\u88d9"],
-  ["school uniform", "\u6821\u670d"], ["military uniform", "\u519b\u88c5"], ["cooking-uniform", "\u53a8\u5e08\u670d"], ["lab coat", "\u5b9e\u9a8c\u670d"],
-  ["black dress", "\u9ed1\u8272\u8fde\u8863\u88d9"], ["white dress", "\u767d\u8272\u8fde\u8863\u88d9"], ["purple dress", "\u7d2b\u8272\u793c\u670d"],
-  ["swimsuit", "\u6cf3\u88c5"], ["bikini", "\u6bd4\u57fa\u5c3c"], ["kimono", "\u548c\u670d"], ["breastplate", "\u80f8\u7532"],
-  ["detached sleeves", "\u5206\u79bb\u8896"], ["boots", "\u957f\u9774"], ["thighhighs", "\u8fc7\u819d\u889c"], ["navel", "\u9732\u8110"],
-  ["hairpin", "\u53d1\u5939"], ["hairclip", "\u53d1\u9970"], ["necklace", "\u9879\u94fe"], ["choker", "\u9888\u5708"], ["jewelry", "\u73e0\u5b9d\u914d\u9970"],
+  ["parted bangs", t("parted bangs")], ["blunt bangs", t("blunt bangs")], ["hair between eyes", t("hair between eyes")],
+  ["twin braids", t("twin braids")], ["side ponytail", t("side ponytail")], ["ponytail", t("ponytail")], ["braid", t("braid")],
+  ["long hair", t("long hair")], ["short hair", t("short hair")], ["medium hair", t("medium hair")],
+  ["black hair", t("black hair")], ["brown hair", t("brown hair")], ["blonde hair", t("blonde hair")], ["white hair", t("white hair")],
+  ["red hair", t("red hair")], ["blue hair", t("blue hair")], ["green hair", t("green hair")], ["pink hair", t("pink hair")],
+  ["purple hair", t("purple hair")], ["orange hair", t("orange hair")], ["grey hair", t("grey hair")], ["aqua hair", t("aqua hair")],
+  ["black eyes", t("black eyes")], ["brown eyes", t("brown eyes")], ["blue eyes", t("blue eyes")], ["green eyes", t("green eyes")],
+  ["red eyes", t("red eyes")], ["pink eyes", t("pink eyes")], ["purple eyes", t("purple eyes")], ["yellow eyes", t("yellow eyes")],
+  ["dark-skinned female", t("dark-skinned female")], ["dark-skinned male", t("dark-skinned female")], ["large breasts", t("large breasts")],
+  ["cropped shirt", t("cropped shirt")], ["ribbed shirt", t("ribbed shirt")], ["white shirt", t("white shirt")],
+  ["cleavage cutout", t("cleavage cutout")], ["puffy long sleeves", t("puffy long sleeves")], ["puffy sleeves", t("puffy sleeves")],
+  ["white skirt", t("white skirt")], ["long skirt", t("long skirt")], ["pleated skirt", t("pleated skirt")], ["plaid skirt", t("plaid skirt")],
+  ["school uniform", t("school uniform")], ["military uniform", t("military uniform")], ["cooking-uniform", t("Chef uniform")], ["lab coat", t("lab coat")],
+  ["black dress", t("black dress")], ["white dress", t("white dress")], ["purple dress", t("purple dress")],
+  ["swimsuit", t("swimsuit")], ["bikini", t("bikini")], ["kimono", t("kimono")], ["breastplate", t("breastplate")],
+  ["detached sleeves", t("detached sleeves")], ["boots", t("boots")], ["thighhighs", t("thighhighs")], ["navel", t("navel")],
+  ["hairpin", t("hairpin")], ["hairclip", t("hairclip")], ["necklace", t("necklace")], ["choker", t("choker")], ["jewelry", t("jewelry")],
 ];
 
 function visualDescription(words) {
   const text = ` ${words.join(" ").toLowerCase()} `;
   const found = [];
   for (const [term, label] of VISUAL_TRAITS) {
-    if (text.includes(` ${term} `) && !found.includes(label)) found.push(label);
+    if (text.includes(` ${term} `) && !found.includes(t(label))) found.push(t(label));
   }
-  return found.length ? `\u89c6\u89c9\u7279\u5f81\uff1a${found.slice(0, 12).join("\u3001")}` : "";
+  return found.length ? format("Visual traits: {0}", [found.slice(0, 12).join("\u3001")]) : "";
 }
 
 function isAppearanceBaseLine(words) {
@@ -1186,22 +1117,22 @@ function isOutfitLine(words) {
 
 function groupNote(words, standalone = false) {
   const mapped = TRIGGER_NOTES[String(words[0] || "").toLowerCase()];
-  if (mapped) return `\u72ec\u7acb\u89e6\u53d1\u6a21\u5f0f\uff1b${mapped}\uff1b\u5171 ${words.length} \u4e2a\u89e6\u53d1\u8bcd`;
+  if (mapped) return format("Standalone trigger mode; {0}; {1} triggers", [t(mapped), words.length]);
   const visual = visualDescription(words);
-  if (visual) return `${visual}\uff1b\u5171 ${words.length} \u4e2a\u89e6\u53d1\u8bcd`;
+  if (visual) return format("{0}; {1} triggers", [visual, words.length]);
   const categories = groupCategories(words);
-  const purpose = categories.length ? categories.slice(0, 3).map((category) => category.note).join("\uff1b") : (standalone ? "\u7528\u4e8e\u5207\u6362\u72ec\u7acb\u89d2\u8272\u3001\u670d\u88c5\u6216\u52a8\u4f5c\u6a21\u5f0f" : "\u542f\u7528\u8be5 LoRA \u7684\u4e3b\u8981\u7279\u5f81");
-  return `${standalone ? "\u72ec\u7acb\u89e6\u53d1\u6a21\u5f0f\uff1b" : ""}${purpose}\uff1b\u5171 ${words.length} \u4e2a\u89e6\u53d1\u8bcd`;
+  const purpose = categories.length ? categories.slice(0, 3).map((category) => category.note).join("\uff1b") : (standalone ? t("Switch between characters, outfits or action modes") : t("Enable the main features of this LoRA"));
+  return format("{0}{1}; {2} triggers", [standalone ? t("Standalone trigger mode; ") : "", purpose, words.length]);
 }
 
 function triggerGroupName(words, index, standalone = false) {
   const first = String(words[0] || "").trim();
   const mapped = TRIGGER_LABELS[first.toLowerCase()];
-  if (mapped) return mapped;
+  if (mapped) return t(mapped);
   if (standalone && first) return first.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
   if (first && !/^(1girl|1boy|girl|boy|woman|man)$/i.test(first) && first.length <= 36) return first;
   const categories = groupCategories(words);
-  return `${categories[0]?.name || "\u9ed8\u8ba4\u89e6\u53d1"}\u7ec4${index > 0 ? ` ${index + 1}` : ""}`;
+  return format("{0} group {1}", [categories[0]?.name || t("Default triggers"), index > 0 ? ` ${index + 1}` : ""]);
 }
 
 function shouldSplitStandaloneTriggers(triggers) {
@@ -1225,8 +1156,8 @@ function groupsForLora(item) {
   const triggers = wordsForLora(item);
   if (!triggers.length) return [{
     id: "missing",
-    name: "\u5f85\u8865\u5145\u89e6\u53d1\u8bcd",
-    note: "\u672a\u4ece\u672c\u5730\u6216\u5143\u6570\u636e\u68c0\u6d4b\u5230\u89e6\u53d1\u8bcd\uff1b\u53ef\u70b9\u51fb\u7f16\u8f91\u624b\u5de5\u5efa\u7ec4",
+    name: t("Triggers needed"),
+    note: t("No triggers found in local metadata; use Edit to create groups"),
     words: [],
   }];
   const structuredLines = triggers.filter((trigger) => trigger.includes(",") || trigger.includes("|"));
@@ -1242,9 +1173,9 @@ function groupsForLora(item) {
       return parsedLines.slice(firstModeIndex).map((modeWords, index) => {
         if (isOutfitLine(modeWords)) {
           const words = [...new Set([...baseWords, ...modeWords])];
-          return { id: `outfit-${index + 1}`, name: `${triggerGroupName(modeWords, index)} \u5b8c\u6574\u9020\u578b`, note: groupNote(words), words };
+          return { id: `outfit-${index + 1}`, name: format("{0} complete outfit", [triggerGroupName(modeWords, index)]), note: groupNote(words), words };
         }
-        return { id: `addon-${index + 1}`, name: `${triggerGroupName(modeWords, index)} \u9644\u52a0\u7ec4`, note: groupNote(modeWords), words: modeWords };
+        return { id: `addon-${index + 1}`, name: format("{0} additional group", [triggerGroupName(modeWords, index)]), note: groupNote(modeWords), words: modeWords };
       });
     }
     return parsedLines.map((words, index) => ({ id: `auto-${index + 1}`, name: triggerGroupName(words, index), note: groupNote(words), words }));
@@ -1277,7 +1208,7 @@ function toggleLoraGroupSelection(item, group, anchorElement) {
   if (!groupCard || !groupList) return;
   const isSelected = selected.has(group.id);
   groupCard.classList.toggle("selected", isSelected);
-  anchorElement.textContent = isSelected ? "✓ 已选" : "选择";
+  anchorElement.textContent = isSelected ? t("✓ Selected") : t("Select");
   anchorElement.classList.toggle("primary", isSelected);
   anchorElement.classList.toggle("subtle", !isSelected);
 
@@ -1287,10 +1218,10 @@ function toggleLoraGroupSelection(item, group, anchorElement) {
   if (!selectedGroups.length) return;
   const combinedActions = el("div", "pwb-lora-combined-actions");
   combinedActions.append(
-    el("strong", "", `已选 ${selectedGroups.length} 组：${selectedGroups.map((candidate) => candidate.name).join(" + ")}`),
-    button("组合加入上方", () => addCombinedGroupsAbove(item, selectedGroups), "primary"),
-    button("组合填入当前字段", () => fillTemplateFromGroups(item, selectedGroups)),
-    button("组合加入群体", (event) => addBatchLoraCombination(item, selectedGroups, event.currentTarget))
+    el("strong", "", format("Selected {0} groups: {1}", [selectedGroups.length, selectedGroups.map((candidate) => candidate.name).join(" + ")])),
+    button(t("Add combination above"), () => addCombinedGroupsAbove(item, selectedGroups), "primary"),
+    button(t("Fill field with combination"), () => fillTemplateFromGroups(item, selectedGroups)),
+    button(t("Add combination to batch"), (event) => addBatchLoraCombination(item, selectedGroups, event.currentTarget))
   );
   groupList.insertBefore(combinedActions, groupList.lastElementChild);
 }
@@ -1301,7 +1232,7 @@ function combinedGroupWords(groups) {
 
 function fillTemplateFromGroups(item, groups) {
   const field = activeTemplateField();
-  if (!field || field.fixed) return toast("\u6ca1\u6709\u53ef\u586b\u5145\u5b57\u6bb5", "\u8bf7\u9009\u62e9\u4e00\u4e2a\u975e\u56fa\u5b9a\u5b57\u6bb5\u3002", "warn");
+  if (!field || field.fixed) return toast(t("No fill target"), t("Select a non-fixed field."), "warn");
   field.value = combinedGroupWords(groups).join(", ");
   field.loraFile = item.file;
   saveState();
@@ -1329,39 +1260,39 @@ async function editLoraGroup(item, group) {
   const groups = groupsForLora(item);
   const index = groups.findIndex((candidate) => candidate.id === group.id);
   if (index < 0) return;
-  const name = prompt("\u5206\u7ec4\u540d\u79f0", group.name);
+  const name = prompt(t("Group name"), group.name);
   if (name === null) return;
-  const note = prompt("\u7528\u9014 / \u8868\u73b0\u5907\u6ce8", group.note || "");
+  const note = prompt(t("Purpose / appearance notes"), group.note || "");
   if (note === null) return;
-  const words = prompt("\u89e6\u53d1\u8bcd\uff08\u9017\u53f7\u6216\u6362\u884c\u5206\u9694\uff09", group.words.join(", "));
+  const words = prompt(t("Triggers (comma or newline separated)"), group.words.join(", "));
   if (words === null) return;
   groups[index] = { ...group, name: name.trim() || group.name, note: note.trim(), words: wordsInGroup({ words: [words.replaceAll("\n", ",")] }) };
   try {
     await saveLoraGroups(item, groups);
     renderLoraLibrary();
-    toast("\u89e6\u53d1\u8bcd\u5206\u7ec4\u5df2\u4fdd\u5b58", groups[index].name, "success");
+    toast(t("Trigger group saved"), groups[index].name, "success");
   } catch (error) {
-    toast("\u4fdd\u5b58\u5206\u7ec4\u5931\u8d25", error.message || String(error), "error");
+    toast(t("Could not save group"), error.message || String(error), "error");
   }
 }
 
 async function addLoraGroup(item) {
-  const name = prompt("\u65b0\u5206\u7ec4\u540d\u79f0", "");
+  const name = prompt(t("New group name"), "");
   if (!name?.trim()) return;
-  const note = prompt("\u7528\u9014 / \u8868\u73b0\u5907\u6ce8", "") ?? "";
-  const words = prompt("\u89e6\u53d1\u8bcd\uff08\u9017\u53f7\u6216\u6362\u884c\u5206\u9694\uff09", "");
+  const note = prompt(t("Purpose / appearance notes"), "") ?? "";
+  const words = prompt(t("Triggers (comma or newline separated)"), "");
   if (!words?.trim()) return;
   const groups = [...groupsForLora(item), { id: uid(), name: name.trim(), note: note.trim(), words: wordsInGroup({ words: [words.replaceAll("\n", ",")] }) }];
   try {
     await saveLoraGroups(item, groups);
     renderLoraLibrary();
   } catch (error) {
-    toast("\u4fdd\u5b58\u5206\u7ec4\u5931\u8d25", error.message || String(error), "error");
+    toast(t("Could not save group"), error.message || String(error), "error");
   }
 }
 
 async function deleteLoraGroup(item, group) {
-  if (!confirm(`\u5220\u9664\u89e6\u53d1\u8bcd\u5206\u7ec4\u201c${group.name}\u201d\uff1f`)) return;
+  if (!confirm(format("Delete trigger group '{0}'?", [group.name]))) return;
   const groups = groupsForLora(item).filter((candidate) => candidate.id !== group.id);
   try {
     await saveLoraGroups(item, groups);
@@ -1375,7 +1306,7 @@ async function deleteLoraGroup(item, group) {
     renderLoraLibrary();
     renderBatchPanel();
   } catch (error) {
-    toast("\u5220\u9664\u5206\u7ec4\u5931\u8d25", error.message || String(error), "error");
+    toast(t("Could not delete group"), error.message || String(error), "error");
   }
 }
 
@@ -1447,7 +1378,7 @@ function syncBatchGroupInPlace(item, group, actionButton) {
       badge = el("span", "pwb-group-batch-state");
       groupText?.querySelector(".pwb-lora-group-name")?.after(badge);
     }
-    badge.textContent = `群体中${entries.length > 1 ? ` ×${entries.length}` : ""}`;
+    badge.textContent = format("In batch {0}", [entries.length > 1 ? ` ×${entries.length}` : ""]);
   } else {
     badge?.remove();
   }
@@ -1455,8 +1386,8 @@ function syncBatchGroupInPlace(item, group, actionButton) {
   const card = groupCard.closest(".pwb-lora-card");
   card?.classList.toggle("batch-selected", state.batchLoraEntries.some((entry) => normalizeLoraKey(entry.key) === key));
   const replacement = isInBatch
-    ? button("从群体取消", (event) => removeBatchLoraGroup(item, group, event.currentTarget), "danger")
-    : button("加入群体", (event) => addBatchLoraGroup(item, group, event.currentTarget));
+    ? button(t("Remove from batch"), (event) => removeBatchLoraGroup(item, group, event.currentTarget), "danger")
+    : button(t("Add to batch"), (event) => addBatchLoraGroup(item, group, event.currentTarget));
   actionButton.replaceWith(replacement);
 }
 
@@ -1465,7 +1396,7 @@ function addBatchLoraGroup(item, group, anchorElement) {
   saveState();
   refreshBatchPanelWithoutJump(anchorElement);
   syncBatchGroupInPlace(item, group, anchorElement);
-  toast("\u5df2\u52a0\u5165\u7fa4\u4f53\u5de5\u4f5c\u6d41", `${translatedLoraName(item.file, displayAliases())} / ${group.name}`, "success");
+  toast(t("Added to batch workflow"), `${translatedLoraName(item.file, displayAliases())} / ${group.name}`, "success");
 }
 
 function batchEntriesForGroup(item, group) {
@@ -1531,7 +1462,7 @@ function deleteLoraWord(item, word) {
 }
 
 function addLoraWords(item) {
-  const added = prompt("追加触发词（可以每行一个）", "");
+  const added = prompt(t("Append triggers (one per line)"), "");
   if (!added?.trim()) return;
   const key = normalizeLoraKey(item.file);
   const additions = added.split("\n").map((word) => normalizeText(word)).filter(Boolean);
@@ -1555,10 +1486,10 @@ function restoreLoraWords(item) {
 
 function editLora(item) {
   const key = normalizeLoraKey(item.file);
-  const alias = prompt("中文显示名称（留空恢复自动翻译）", state.loraAliases[key] || translatedLoraName(item.file, displayAliases()));
+  const alias = prompt(t("Display alias (leave empty to restore the automatic name)"), state.loraAliases[key] || translatedLoraName(item.file, displayAliases()));
   if (alias === null) return;
   if (alias.trim()) state.loraAliases[key] = alias.trim(); else delete state.loraAliases[key];
-  const triggers = prompt("触发词组（每行一个；只保存在本浏览器）", wordsForLora(item).join("\n"));
+  const triggers = prompt(t("Trigger groups (one per line; saved in this browser only)"), wordsForLora(item).join("\n"));
   if (triggers !== null) {
     state.loraTriggers[key] = triggers.split("\n").map((word) => word.trim()).filter(Boolean);
     if (Array.isArray(state.loraTriggerSelections[key])) {
@@ -1573,15 +1504,15 @@ function editLora(item) {
 
 function fillTemplateFromLora(item) {
   const field = activeTemplateField();
-  if (!field) return toast("没有可变填充位", "请在模板中添加或选择一个非固定字段。", "warn");
-  if (field.fixed) return toast("当前字段已固定", "请选择一个非固定字段。", "warn");
+  if (!field) return toast(t("No variable fill target"), t("Add or select a non-fixed template field."), "warn");
+  if (field.fixed) return toast(t("The current field is fixed"), t("Select a non-fixed field."), "warn");
   const words = selectedWordsForLora(item);
-  if (!words.length) return toast("没有触发词", "可以点“中文名 / 触发词”手工补充。", "warn");
+  if (!words.length) return toast(t("No triggers"), t("Use Alias / triggers to add them manually."), "warn");
   field.value = words.join(", ");
   field.loraFile = item.file;
   saveState();
   renderTemplates();
-  toast("已填入模板", `${activeTemplate().name} / ${field.name}`, "success");
+  toast(t("Template filled"), `${activeTemplate().name} / ${field.name}`, "success");
 }
 
 function toggleTemplateFixedLora(item) {
@@ -1651,7 +1582,7 @@ async function renderLoraLibraryNow() {
   await loadLoras();
   if (targetRoot !== loraRoot || !targetRoot.isConnected) return;
   const viewport = captureLoraViewport();
-  loraRoot.replaceChildren(el("div", "pwb-empty-inline", `LoRA 数据已准备好，正在生成 ${loraItems.length} 条完整目录…`));
+  loraRoot.replaceChildren(el("div", "pwb-empty-inline", format("LoRA data ready; building {0} catalog entries…", [loraItems.length])));
   await new Promise((resolve) => requestAnimationFrame(resolve));
   if (targetRoot !== loraRoot || !targetRoot.isConnected) return;
   if (loraModelSelect) {
@@ -1660,7 +1591,7 @@ async function renderLoraLibraryNow() {
     if (loraModelSelect.dataset.signature !== signature) {
       const selected = loraModelSelect.value;
       loraModelSelect.innerHTML = "";
-      loraModelSelect.append(new Option(t("全部模型"), ""));
+      loraModelSelect.append(new Option(t("All models"), ""));
       for (const model of models) {
         const count = loraItems.filter((item) => loraBaseModel(item) === model).length;
         loraModelSelect.append(new Option(`${model} (${count})`, model));
@@ -1686,7 +1617,7 @@ async function renderLoraLibraryNow() {
     return !needle || recordText.includes(needle) || groupText.toLowerCase().includes(needle);
   });
   if (!matches.length) {
-    loraRoot.replaceChildren(el("div", "pwb-empty-inline", loraItems.length ? "没有匹配的 LoRA。" : "没有读取到 LoRA 数据。"));
+    loraRoot.replaceChildren(el("div", "pwb-empty-inline", loraItems.length ? t("No matching LoRAs.") : t("No LoRA data available.")));
     return;
   }
   const libraryEntries = [];
@@ -1740,7 +1671,7 @@ async function renderLoraLibraryNow() {
   }
   const visibleEntries = orderedEntries;
   const renderTarget = document.createDocumentFragment();
-  renderTarget.append(el("div", "pwb-hint", `已完整加载 ${orderedEntries.length} 个人物或 LoRA；详情在展开时生成。`));
+  renderTarget.append(el("div", "pwb-hint", format("Loaded {0} characters or LoRAs; details are generated when expanded.", [orderedEntries.length])));
   const characterRoots = new Map();
   for (const entry of visibleEntries) {
     const item = entry.item;
@@ -1760,17 +1691,17 @@ async function renderLoraLibraryNow() {
         mergedHead.append(
           el("strong", "", archiveCharacter),
           el("span", "pwb-muted", characterCount > 1
-            ? `${characterCount} 个 LoRA，已按同一人物合并`
+            ? format("{0} LoRAs grouped as one character", [characterCount])
             : splitFromMultiCharacterLora
-              ? "来自多人 LoRA，已按人物拆分"
-              : "1 个 LoRA，已作为人物卡归档")
+              ? t("Split by character from a multi-character LoRA")
+              : t("1 LoRA grouped as a character card"))
         );
         const variants = [...new Set(characterEntries.map((candidate) => candidate.item.sourceLabel || translatedLoraName(candidate.item.file, displayAliases())))];
         const mergedBody = el("div", "pwb-character-merged-body");
         merged.append(mergedHead);
         if (variants.length) {
           const variantList = el("div", "pwb-character-merged-variants");
-          variantList.append(el("span", "pwb-muted", "版本"));
+          variantList.append(el("span", "pwb-muted", t("Version")));
           for (const variant of variants) variantList.append(el("span", "pwb-character-version-chip", variant));
           merged.append(variantList);
         }
@@ -1788,9 +1719,9 @@ async function renderLoraLibraryNow() {
       summary.append(
         el("strong", "", item.sourceLabel || translatedLoraName(item.file, displayAliases())),
         el("span", "pwb-lora-model", baseModel),
-        el("span", "pwb-muted", `${entry.groups.length} 个分组${selectedGroupCount ? ` · 已选 ${selectedGroupCount}` : ""}`)
+        el("span", "pwb-muted", format("{0} groups{1}", [entry.groups.length, selectedGroupCount ? format(" · Selected {0}", [selectedGroupCount]) : ""]))
       );
-      if (batchSelected) summary.append(el("span", "pwb-group-batch-state", "已加入群体"));
+      if (batchSelected) summary.append(el("span", "pwb-group-batch-state", t("Added to batch")));
       return summary;
     };
     if (!expandedLoraEntries.has(entryKey)) {
@@ -1817,10 +1748,10 @@ async function renderLoraLibraryNow() {
     names.append(
       el("strong", "pwb-lora-cn", translatedLoraName(item.file, displayAliases())),
       el("span", "pwb-lora-original", item.name || item.file),
-      el("span", `pwb-lora-model${baseModel === "未知模型" ? " unknown" : ""}`, `对应模型：${baseModel}`)
+      el("span", `pwb-lora-model${baseModel === t("Unknown model") ? " unknown" : ""}`, format("Base model: {0}", [baseModel]))
     );
     if (item.notes) names.append(el("span", "pwb-lora-note", item.notes));
-    head.append(names, button("中文名 / 触发词", () => editLora(item), "subtle"));
+    head.append(names, button(t("Alias / triggers"), () => editLora(item), "subtle"));
     card.append(head);
     const groups = entry.groups;
     if (groups.length) {
@@ -1838,32 +1769,32 @@ async function renderLoraLibraryNow() {
         const groupHead = el("div", "pwb-lora-group-head");
         const groupText = el("div", "pwb-lora-group-text");
         groupText.append(el("strong", "pwb-lora-group-name", group.name));
-        if (isInBatch) groupText.append(el("span", "pwb-group-batch-state", `群体中${batchEntries.length > 1 ? ` ×${batchEntries.length}` : ""}`));
+        if (isInBatch) groupText.append(el("span", "pwb-group-batch-state", format("In batch {0}", [batchEntries.length > 1 ? ` ×${batchEntries.length}` : ""])));
         const sourceLabel = group.sourceLabel || item.sourceLabel || translatedLoraName(item.file, displayAliases());
-        const sourceNote = mergedCharacter && !String(group.note || "").includes(sourceLabel) ? `版本来源：${sourceLabel}` : "";
+        const sourceNote = mergedCharacter && !String(group.note || "").includes(sourceLabel) ? format("Version source: {0}", [sourceLabel]) : "";
         if (group.note || sourceNote) groupText.append(el("span", "pwb-lora-group-note", [group.note, sourceNote].filter(Boolean).join("；")));
         const groupEditActions = el("div", "pwb-actions compact");
-        if (group.words.length) groupEditActions.append(button(isGroupSelected ? "\u2713 \u5df2\u9009" : "\u9009\u62e9", (event) => toggleLoraGroupSelection(item, group, event.currentTarget), isGroupSelected ? "primary" : "subtle"));
-        groupEditActions.append(button("\u7f16\u8f91", () => editLoraGroup(item, group), "subtle"));
-        if (group.id !== "missing") groupEditActions.append(button("\u5220\u9664\u7ec4", () => deleteLoraGroup(item, group), "subtle danger"));
+        if (group.words.length) groupEditActions.append(button(isGroupSelected ? t("✓ Selected") : t("Select"), (event) => toggleLoraGroupSelection(item, group, event.currentTarget), isGroupSelected ? "primary" : "subtle"));
+        groupEditActions.append(button(t("Edit"), () => editLoraGroup(item, group), "subtle"));
+        if (group.id !== "missing") groupEditActions.append(button(t("Delete group"), () => deleteLoraGroup(item, group), "subtle danger"));
         groupHead.append(groupText, groupEditActions);
-        const preview = el("div", "pwb-lora-group-preview", group.words.length ? group.words.join(", ") : "\u6682\u65e0\u89e6\u53d1\u8bcd");
+        const preview = el("div", "pwb-lora-group-preview", group.words.length ? group.words.join(", ") : t("No triggers yet"));
         preview.title = group.words.join(", ");
         const groupActions = el("div", "pwb-actions compact");
         if (group.words.length) {
           groupActions.append(
-            button("\u52a0\u5165\u4e0a\u65b9", () => addSelection("lora", `${translatedLoraName(item.file, displayAliases())} / ${group.name}`, group.words.join(", "), { loraFile: item.file }), "primary"),
-            button("\u586b\u5165\u5f53\u524d\u5b57\u6bb5", () => {
+            button(t("Add above"), () => addSelection("lora", `${translatedLoraName(item.file, displayAliases())} / ${group.name}`, group.words.join(", "), { loraFile: item.file }), "primary"),
+            button(t("Fill current field"), () => {
               const field = activeTemplateField();
-              if (!field || field.fixed) return toast("\u6ca1\u6709\u53ef\u586b\u5145\u5b57\u6bb5", "\u8bf7\u9009\u62e9\u4e00\u4e2a\u975e\u56fa\u5b9a\u5b57\u6bb5\u3002", "warn");
+              if (!field || field.fixed) return toast(t("No fill target"), t("Select a non-fixed field."), "warn");
               field.value = group.words.join(", ");
               field.loraFile = item.file;
               saveState();
               renderTemplates();
             }),
             isInBatch
-              ? button("从群体取消", (event) => removeBatchLoraGroup(item, group, event.currentTarget), "danger")
-              : button("\u52a0\u5165\u7fa4\u4f53", (event) => addBatchLoraGroup(item, group, event.currentTarget))
+              ? button(t("Remove from batch"), (event) => removeBatchLoraGroup(item, group, event.currentTarget), "danger")
+              : button(t("Add to batch"), (event) => addBatchLoraGroup(item, group, event.currentTarget))
           );
         }
         groupCard.append(groupHead, preview, groupActions);
@@ -1872,44 +1803,43 @@ async function renderLoraLibraryNow() {
       if (selectedGroups.length) {
         const combinedActions = el("div", "pwb-lora-combined-actions");
         combinedActions.append(
-          el("strong", "", `\u5df2\u9009 ${selectedGroups.length} \u7ec4\uff1a${selectedGroups.map((group) => group.name).join(" + ")}`),
-          button("\u7ec4\u5408\u52a0\u5165\u4e0a\u65b9", () => addCombinedGroupsAbove(item, selectedGroups), "primary"),
-          button("\u7ec4\u5408\u586b\u5165\u5f53\u524d\u5b57\u6bb5", () => fillTemplateFromGroups(item, selectedGroups)),
-          button("\u7ec4\u5408\u52a0\u5165\u7fa4\u4f53", (event) => addBatchLoraCombination(item, selectedGroups, event.currentTarget))
+          el("strong", "", format("Selected {0} groups: {1}", [selectedGroups.length, selectedGroups.map((group) => group.name).join(" + ")])),
+          button(t("Add combination above"), () => addCombinedGroupsAbove(item, selectedGroups), "primary"),
+          button(t("Fill field with combination"), () => fillTemplateFromGroups(item, selectedGroups)),
+          button(t("Add combination to batch"), (event) => addBatchLoraCombination(item, selectedGroups, event.currentTarget))
         );
         groupList.append(combinedActions);
       }
-      groupList.append(button("\uff0b \u65b0\u5efa\u89e6\u53d1\u8bcd\u5206\u7ec4", () => addLoraGroup(item), "subtle"));
+      groupList.append(button(t("+ New trigger group"), () => addLoraGroup(item), "subtle"));
       card.append(groupList);
     } else {
     const chips = el("div", "pwb-library-chips");
     if (words.length) words.forEach((word) => {
       const chip = el("span", `pwb-word-chip ${selectedSet.has(word) ? "selected" : "unselected"}`);
       const choose = button(`${selectedSet.has(word) ? "✓ " : ""}${word}`, () => toggleLoraWord(item, word), "word-toggle");
-      choose.title = selectedSet.has(word) ? "已选择；点击取消" : "未选择；点击加入";
+      choose.title = selectedSet.has(word) ? t("Selected; click to deselect") : t("Not selected; click to add");
       const remove = button("×", () => deleteLoraWord(item, word), "word-delete danger");
-      remove.title = "直接删除这个触发词";
+      remove.title = t("Remove this trigger");
       chip.append(choose, remove);
       chips.append(chip);
     });
-    else chips.append(el("span", "pwb-muted", "暂无触发词，可手工补充"));
+    else chips.append(el("span", "pwb-muted", t("No triggers yet; add them manually")));
     card.append(chips);
     const wordActions = el("div", "pwb-actions compact pwb-word-actions");
     wordActions.append(
-      button("全选", () => setSelectedLoraWords(item, words), "subtle"),
-      button("清空选择", () => setSelectedLoraWords(item, []), "subtle"),
-      button("＋追加", () => addLoraWords(item), "subtle"),
+      button(t("Select all"), () => setSelectedLoraWords(item, words), "subtle"),
+      button(t("Clear selection"), () => setSelectedLoraWords(item, []), "subtle"),
+      button(t("+ Append"), () => addLoraWords(item), "subtle"),
     );
-    if (Object.hasOwn(state.loraTriggers, key)) wordActions.append(button("恢复原始", () => restoreLoraWords(item), "subtle"));
+    if (Object.hasOwn(state.loraTriggers, key)) wordActions.append(button(t("Restore original"), () => restoreLoraWords(item), "subtle"));
     card.append(wordActions);
     }
     const actions = el("div", "pwb-actions wrap");
     if (!groups.length) actions.append(
-      button("\u6240\u9009\u8bcd\u52a0\u5165\u4e0a\u65b9", () => addSelection("lora", translatedLoraName(item.file, displayAliases()), selectedWords.join(", "), { loraFile: item.file }), "primary"),
-      button("\u586b\u5165\u6a21\u677f\u5f53\u524d\u5b57\u6bb5", () => fillTemplateFromLora(item))
+      button(t("Add selected words above"), () => addSelection("lora", translatedLoraName(item.file, displayAliases()), selectedWords.join(", "), { loraFile: item.file }), "primary"),
+      button(t("Fill current template field"), () => fillTemplateFromLora(item))
     );
-    actions.append(button(templateFixed ? "\u79fb\u51fa\u5f53\u524d\u6a21\u677f\u56fa\u5b9a" : "\u8bbe\u4e3a\u5f53\u524d\u6a21\u677f\u56fa\u5b9a", () => toggleTemplateFixedLora(item), templateFixed ? "fixed-selected" : ""));
-    actions.append(button("\u5220\u9664 LoRA", () => deleteLoraFile(item), "danger"));
+    actions.append(button(templateFixed ? t("Remove from fixed template LoRAs") : t("Add to fixed template LoRAs"), () => toggleTemplateFixedLora(item), templateFixed ? "fixed-selected" : ""));
     card.append(actions);
     const variant = el("details", "pwb-character-variant");
     variant.dataset.loraEntryKey = entryKey;
@@ -1991,7 +1921,7 @@ function batchEntries() {
     entries.push({ label: `${translatedLoraName(item.file, displayAliases())} / ${groups.map((group) => group.name).join(" + ") || selected.label || ""}`, character, text, loraFile: item.file });
   }
   for (const [index, text] of state.batchManualText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).entries()) {
-    entries.push({ label: `手工人物 ${index + 1}`, character: `手工人物 ${index + 1}`, text });
+    entries.push({ label: format("Manual character {0}", [index + 1]), character: format("Manual character {0}", [index + 1]), text });
   }
   return entries;
 }
@@ -2013,22 +1943,22 @@ function currentBatchPresetData() {
 }
 
 function saveCurrentBatchPreset() {
-  const suggested = `群体方案 ${state.batchPresets.length + 1}`;
-  const name = prompt("保存群体工作流名称", suggested)?.trim();
+  const suggested = format("Batch preset {0}", [state.batchPresets.length + 1]);
+  const name = prompt(t("Batch preset name"), suggested)?.trim();
   if (!name) return;
   const existing = state.batchPresets.find((preset) => preset.name === name);
-  if (existing && !confirm(`已存在“${name}”，要用当前选择覆盖吗？`)) return;
+  if (existing && !confirm(format("'{0}' already exists. Replace it with the current selection?", [name]))) return;
   const payload = { ...(existing || { id: uid(), createdAt: Date.now() }), ...currentBatchPresetData(), name, updatedAt: Date.now() };
   if (existing) state.batchPresets[state.batchPresets.indexOf(existing)] = payload;
   else state.batchPresets.push(payload);
   saveState();
   renderBatchPanel();
-  toast("群体工作流已保存", `${name} · ${payload.loraEntries.length} 个 LoRA 选择`, "success");
+  toast(t("Batch preset saved"), format("{0} · {1} LoRA selections", [name, payload.loraEntries.length]), "success");
 }
 
 function loadBatchPreset(presetId) {
   const preset = state.batchPresets.find((candidate) => candidate.id === presetId);
-  if (!preset) return toast("找不到群体方案", "该方案可能已被删除。", "warn");
+  if (!preset) return toast(t("Batch preset not found"), t("This preset may have been deleted."), "warn");
   if (Array.isArray(preset.templates)) {
     for (const template of clone(preset.templates)) {
       const index = state.templates.findIndex((entry) => entry.id === template.id);
@@ -2045,19 +1975,19 @@ function loadBatchPreset(presetId) {
   renderBatchPanel();
   renderTemplates();
   renderLoraLibrary();
-  toast("已载入群体工作流", `${preset.name} · ${state.batchLoraEntries.length} 个 LoRA 选择`, "success");
+  toast(t("Batch preset loaded"), format("{0} · {1} LoRA selections", [preset.name, state.batchLoraEntries.length]), "success");
 }
 
 function deleteBatchPreset(presetId) {
   const preset = state.batchPresets.find((candidate) => candidate.id === presetId);
-  if (!preset || !confirm(`删除已保存的群体工作流“${preset.name}”？`)) return;
+  if (!preset || !confirm(format("Delete saved batch workflow '{0}'?", [preset.name]))) return;
   state.batchPresets = state.batchPresets.filter((candidate) => candidate.id !== presetId);
   saveState();
   renderBatchPanel();
 }
 
 function clearCurrentBatchSelection() {
-  if ((state.batchLoraEntries.length || state.batchManualText.trim()) && !confirm("清空当前群体选择？已保存的群体工作流不会受影响。")) return;
+  if ((state.batchLoraEntries.length || state.batchManualText.trim()) && !confirm(t("Clear the current batch selection? Saved presets will be kept."))) return;
   state.batchLoraEntries = [];
   state.batchManualText = "";
   saveState();
@@ -2182,22 +2112,22 @@ function batchJobSignature(job) {
 
 function prepareBatchExecution(plan) {
   const target = selectedTextWidget();
-  if (!target) throw new Error("先在画布上选中要替换文字的 CLIP / 提示词节点。");
+  if (!target) throw new Error(t("Select the CLIP / prompt node to update on the canvas."));
   const templates = plan.templates;
   const entries = plan.entries;
   const loraEntries = entries.filter((entry) => entry.loraFile);
   const loraTargets = batchLoraTargets(entries, plan.changeLora);
-  if (plan.changeLora && loraEntries.length && !loraTargets.length) throw new Error("请在画布上同时选中提示词节点和要自动切换的 LoRA 加载节点。");
+  if (plan.changeLora && loraEntries.length && !loraTargets.length) throw new Error(t("Select both the prompt node and the LoRA loader to switch automatically."));
   const fixedLoraCount = Math.max(0, ...templates.map((template) => (template.fixedLoraFiles || []).length));
   const fixedLoraPlan = batchFixedLoraTargets(templates, loraTargets);
   const fixedLoraTargets = fixedLoraPlan.targets;
-  if (fixedLoraPlan.assignedCount < fixedLoraCount) throw new Error(`固定 LoRA 节点不足：还需选中 ${fixedLoraCount - fixedLoraPlan.assignedCount} 个兼容节点。`);
+  if (fixedLoraPlan.assignedCount < fixedLoraCount) throw new Error(format("Not enough fixed LoRA loaders: select {0} more compatible nodes.", [fixedLoraCount - fixedLoraPlan.assignedCount]));
   return { target, loraTargets, fixedLoraTargets };
 }
 
 async function lightweightQueueRemaining() {
   const response = await api.fetchApi("/prompt", { cache: "no-store" });
-  if (!response.ok) throw new Error(`读取队列容量失败（HTTP ${response.status}）`);
+  if (!response.ok) throw new Error(format("Could not read queue capacity (HTTP {0})", [response.status]));
   const payload = await response.json();
   return Math.max(0, Number(payload?.exec_info?.queue_remaining || 0));
 }
@@ -2210,32 +2140,32 @@ async function waitForBatchQueueSlot(control, queued, total) {
     if (remaining < BATCH_QUEUE_HIGH_WATER) return true;
     batchRunProgress.status = "feeding";
     if (control?.isConnected) {
-      control.textContent = `稳定投喂 ${queued} / ${total} · 队列 ${remaining}`;
+      control.textContent = format("Submitting {0} / {1} · Queue {2}", [queued, total, remaining]);
     }
     await new Promise((resolve) => setTimeout(resolve, BATCH_QUEUE_POLL_MS));
   }
 }
 
 function pauseBatchSubmission() {
-  if (!batchQueueRunning) return toast("当前没有正在投喂的群体任务", "开始群体工作流后可在这里暂停。", "warn");
+  if (!batchQueueRunning) return toast(t("No batch is currently submitting"), t("Start a batch workflow to pause it here."), "warn");
   batchPauseRequested = true;
   batchRunProgress.paused = true;
   persistBatchRunProgress();
   const control = document.querySelector(".pwb-batch-pause");
   if (control) {
     control.disabled = true;
-    control.textContent = "正在暂停…";
+    control.textContent = t("Pausing…");
   }
-  toast("正在暂停群体工作流", "将停止提交新任务；已经进入 ComfyUI 队列的任务仍会完成。", "success");
+  toast(t("Pausing batch"), t("New submissions will stop. Tasks already queued will finish."), "success");
 }
 
 async function submitBatchJobIndexes(plan, indexes, { firstAtFront = false } = {}) {
-  if (batchQueueRunning) return toast("群体任务正在提交", "请等待当前批次提交完成。", "warn");
+  if (batchQueueRunning) return toast(t("Batch is submitting"), t("Wait for the current submission to finish."), "warn");
   let execution;
   try {
     execution = prepareBatchExecution(plan);
   } catch (error) {
-    return toast("无法继续群体任务", error.message, "warn");
+    return toast(t("Cannot resume batch"), error.message, "warn");
   }
   const { target, loraTargets, fixedLoraTargets } = execution;
   const original = target.widget.value;
@@ -2259,7 +2189,7 @@ async function submitBatchJobIndexes(plan, indexes, { firstAtFront = false } = {
         break;
       }
       const job = batchRunJobAt(plan, jobIndex);
-      if (control) control.textContent = `正在提交 ${queued + 1} / ${indexes.length}`;
+      if (control) control.textContent = format("Submitting {0} / {1}", [queued + 1, indexes.length]);
       target.widget.value = job.text;
       target.widget.callback?.(job.text, app.canvas, target.node, target.widget);
       setBatchLora(loraTargets, job.entry);
@@ -2296,14 +2226,14 @@ async function submitBatchJobIndexes(plan, indexes, { firstAtFront = false } = {
     batchRunProgress.paused = paused;
     batchRunProgress.lastError = "";
     persistBatchRunProgress();
-    if (paused) toast("群体工作流已暂停", `本次已提交 ${queued} 项；断点和完整方案仍保留，可稍后继续。`, "success");
-    else toast(firstAtFront ? "群体工作流已续接" : "群体工作流已加入队列", `${queued} 个缺失任务已提交；已在运行或排队的任务不会重复。`, "success");
+    if (paused) toast(t("Batch paused"), format("Submitted {0} tasks; the plan and resume point are saved for later.", [queued]), "success");
+    else toast(firstAtFront ? t("Batch resumed") : t("Batch queued"), format("Submitted {0} missing tasks without duplicating running or queued tasks.", [queued]), "success");
     if (activeTab === "queue") renderQueue();
   } catch (error) {
     batchRunProgress.status = "interrupted";
     batchRunProgress.lastError = error.message;
     persistBatchRunProgress();
-    toast("批量入队中断", `已加入 ${queued} 项；${error.message}`, "error");
+    toast(t("Batch submission interrupted"), format("Added {0} tasks; {1}", [queued, error.message]), "error");
   } finally {
     batchQueueRunning = false;
     batchPauseRequested = false;
@@ -2313,7 +2243,7 @@ async function submitBatchJobIndexes(plan, indexes, { firstAtFront = false } = {
     }
     if (pauseControl?.isConnected) {
       pauseControl.disabled = true;
-      pauseControl.textContent = "暂停投喂";
+      pauseControl.textContent = t("Pause submission");
     }
     target.widget.value = original;
     target.widget.callback?.(original, app.canvas, target.node, target.widget);
@@ -2325,11 +2255,11 @@ async function submitBatchJobIndexes(plan, indexes, { firstAtFront = false } = {
 }
 
 async function queueBatch() {
-  if (batchQueueRunning) return toast("群体任务正在提交", "请等待当前批次提交完成。", "warn");
+  if (batchQueueRunning) return toast(t("Batch is submitting"), t("Wait for the current submission to finish."), "warn");
   const templates = batchTemplates();
   const entries = batchEntries();
-  if (!templates.length) return toast("没有选择模板", "请至少勾选一个模板。", "warn");
-  if (!entries.length) return toast("没有人物提示词", "从 LoRA 库加入人物，或每行填写一个手工提示词。", "warn");
+  if (!templates.length) return toast(t("No templates selected"), t("Select at least one template."), "warn");
+  if (!entries.length) return toast(t("No character prompts"), t("Add a character from the LoRA library or enter one prompt per line."), "warn");
   const plan = {
     id: uid(),
     createdAt: Date.now(),
@@ -2341,11 +2271,11 @@ async function queueBatch() {
   try {
     prepareBatchExecution(plan);
   } catch (error) {
-    return toast("无法开始群体任务", error.message, "warn");
+    return toast(t("Cannot start batch"), error.message, "warn");
   }
   const total = batchRunJobCount(plan);
-  if (total > 200 && !confirm(`即将提交 ${total} 个任务。提交过程会分批进行，确定继续吗？`)) return;
-  if (validBatchRun() && batchRunProgress.status !== "completed" && !confirm("存在尚可继续的上次群体任务。开始新批次会替换它的继续记录，确定吗？")) return;
+  if (total > 200 && !confirm(format("Submit {0} tasks? They will be added gradually. Continue?", [total]))) return;
+  if (validBatchRun() && batchRunProgress.status !== "completed" && !confirm(t("A previous batch can still be resumed. Starting a new batch replaces its resume record. Continue?"))) return;
   batchRunPlan = plan;
   batchRunProgress = { runId: plan.id, status: "ready", nextIndex: 0, resumeIndex: 0, completedThrough: 0, jobs: {}, lastError: "" };
   persistBatchRunPlan();
@@ -2369,7 +2299,7 @@ async function batchRunServerStatus() {
 
 async function batchRunQueueOnlyStatus(signatures) {
   const response = await api.fetchApi("/queue", { cache: "no-store" });
-  if (!response.ok) throw new Error(`读取队列失败（HTTP ${response.status}）`);
+  if (!response.ok) throw new Error(format("Could not read queue (HTTP {0})", [response.status]));
   const queue = await response.json();
   const result = { statuses: {}, by_job: {}, by_signature: {}, queueOnly: true };
   const wanted = new Set(signatures);
@@ -2392,13 +2322,13 @@ async function batchRunQueueOnlyStatus(signatures) {
 }
 
 async function resumeBatchRun() {
-  if (!validBatchRun()) return toast("没有可继续的群体任务", "请先开始一次群体工作流。", "warn");
-  if (batchQueueRunning) return toast("群体任务正在提交", "请等待当前批次提交完成。", "warn");
+  if (!validBatchRun()) return toast(t("No batch to resume"), t("Start a batch workflow first."), "warn");
+  if (batchQueueRunning) return toast(t("Batch is submitting"), t("Wait for the current submission to finish."), "warn");
   const control = document.querySelector(".pwb-batch-resume");
   const oldLabel = control?.textContent;
   if (control) {
     control.disabled = true;
-    control.textContent = "正在核对队列…";
+    control.textContent = t("Checking queue…");
   }
   try {
     const server = await batchRunServerStatus();
@@ -2444,15 +2374,15 @@ async function resumeBatchRun() {
       batchRunProgress.status = completed === batchRunJobCount() ? "completed" : "queued";
       persistBatchRunProgress();
       renderBatchPanel();
-      return toast(completed === batchRunJobCount() ? "群体任务已经完成" : "群体任务仍在继续", completed === batchRunJobCount() ? "没有遗漏的任务。" : `${active} 项仍在运行或排队，无需重复提交。`, "success");
+      return toast(completed === batchRunJobCount() ? t("Batch completed") : t("Batch is still running"), completed === batchRunJobCount() ? t("No tasks are missing.") : format("{0} tasks are still running or queued; no resubmission is needed.", [active]), "success");
     }
     const firstJob = batchRunJobAt(batchRunPlan, missing[0]);
     const firstName = firstJob.entry.character || firstJob.entry.label;
-    const message = `检测到：已完成 ${completed} 项、仍在运行/排队 ${active} 项、缺失或中断 ${missing.length} 项。\n\n将从“${firstName} / ${firstJob.template.name}”续接；第一项插到队首，其余只补缺失，不重复现有队列。确定继续吗？`;
+    const message = format("Detected: {0} completed, {1} running/queued, {2} missing/interrupted.\n\nResume from '{3} / {4}'? The first task goes to the front; only missing tasks are added.", [completed, active, missing.length, firstName, firstJob.template.name]);
     if (!confirm(message)) return;
     await submitBatchJobIndexes(batchRunPlan, missing, { firstAtFront: true });
   } catch (error) {
-    toast("检查上次群体任务失败", error.message, "error");
+    toast(t("Could not check previous batch"), error.message, "error");
   } finally {
     if (control?.isConnected) {
       control.disabled = false;
@@ -2464,7 +2394,7 @@ async function resumeBatchRun() {
 function createCurrentBatchRun(resumeIndex = 0) {
   const templates = batchTemplates();
   const entries = batchEntries();
-  if (!templates.length || !entries.length) throw new Error("请保留上次使用的模板和人物选择。");
+  if (!templates.length || !entries.length) throw new Error(t("Keep the templates and characters used for the previous batch."));
   const plan = {
     id: uid(),
     createdAt: Date.now(),
@@ -2488,23 +2418,23 @@ async function adoptCurrentBatchRun() {
     createCurrentBatchRun();
     await resumeBatchRun();
   } catch (error) {
-    toast("无法建立继续记录", error.message, "warn");
+    toast(t("Cannot create resume record"), error.message, "warn");
   }
 }
 
 async function resumeCurrentBatchFromPosition(position) {
   try {
     const requested = Number(position);
-    if (!Number.isInteger(requested) || requested < 1) throw new Error("请输入有效的任务序号，例如 190。");
+    if (!Number.isInteger(requested) || requested < 1) throw new Error(t("Enter a valid task number, for example 190."));
     const total = batchTemplates().length * batchEntries().length;
-    if (!total) throw new Error("请保留上次使用的模板和人物选择。");
-    if (requested > total) throw new Error(`当前组合一共只有 ${total} 项。`);
+    if (!total) throw new Error(t("Keep the templates and characters used for the previous batch."));
+    if (requested > total) throw new Error(format("The current combination has only {0} tasks.", [total]));
     const plan = createCurrentBatchRun(requested - 1);
-    if (!confirm(`将跳过前 ${requested - 1} 项，直接从第 ${requested} / ${total} 项开始，并依次提交到最后。确定吗？`)) return;
+    if (!confirm(format("Skip {0} tasks and submit from task {1} / {2} through the end?", [requested - 1, requested, total]))) return;
     const indexes = Array.from({ length: total - requested + 1 }, (_, offset) => requested - 1 + offset);
     await submitBatchJobIndexes(plan, indexes, { firstAtFront: true });
   } catch (error) {
-    toast("无法从指定序号继续", error.message, "warn");
+    toast(t("Cannot resume from that task"), error.message, "warn");
   }
 }
 
@@ -2515,21 +2445,21 @@ function renderBatchPanel() {
   const presetSelect = el("select", "pwb-select pwb-batch-preset-select");
   if (state.batchPresets.length) {
     for (const preset of state.batchPresets) {
-      const option = el("option", "", `${preset.name}（${(preset.loraEntries || []).length} 项）`);
+      const option = el("option", "", format("{0} ({1} tasks)", [preset.name, (preset.loraEntries || []).length]));
       option.value = preset.id;
       presetSelect.append(option);
     }
   } else {
-    const option = el("option", "", "尚无已保存方案");
+    const option = el("option", "", t("No saved presets"));
     option.value = "";
     presetSelect.append(option);
   }
-  const loadPreset = button("载入", () => loadBatchPreset(presetSelect.value), "primary");
-  const deletePreset = button("删除", () => deleteBatchPreset(presetSelect.value), "subtle danger");
+  const loadPreset = button(t("Load"), () => loadBatchPreset(presetSelect.value), "primary");
+  const deletePreset = button(t("Delete"), () => deleteBatchPreset(presetSelect.value), "subtle danger");
   loadPreset.disabled = deletePreset.disabled = !state.batchPresets.length;
   const presetActions = el("div", "pwb-batch-preset-actions");
-  presetActions.append(loadPreset, button("保存当前", saveCurrentBatchPreset), button("清空当前", clearCurrentBatchSelection, "subtle"), deletePreset);
-  presetBox.append(el("div", "pwb-batch-resume-title", "已保存的群体工作流"), presetSelect, presetActions, el("div", "pwb-hint", "保存会记录模板、人物/服装组合、手工提示词和 LoRA 自动切换设置。可先保存 1/2/3，再清空当前去处理 4，之后一键载回。"));
+  presetActions.append(loadPreset, button(t("Save current"), saveCurrentBatchPreset), button(t("Clear current"), clearCurrentBatchSelection, "subtle"), deletePreset);
+  presetBox.append(el("div", "pwb-batch-resume-title", t("Saved batch presets")), presetSelect, presetActions, el("div", "pwb-hint", t("Save templates, character/outfit selections, manual prompts and automatic LoRA switching. Save 1/2/3, clear the selection to work on 4, then load the saved preset.")));
   const templateList = el("div", "pwb-batch-grid");
   for (const template of state.templates) {
     const label = el("label", "pwb-batch-choice");
@@ -2544,12 +2474,12 @@ function renderBatchPanel() {
       renderBatchPanel();
     });
     const fillField = templateFillField(template);
-    label.append(checkbox, el("span", "", `${template.name} → ${fillField?.name || "无可变字段"}`));
+    label.append(checkbox, el("span", "", `${template.name} → ${fillField?.name || t("No variable field")}`));
     templateList.append(label);
   }
   const manual = el("textarea", "pwb-output pwb-batch-manual");
   manual.value = state.batchManualText;
-  manual.placeholder = t("也可每行填写一个人物/替换提示词，例如：\ncharacter A\ncharacter B");
+  manual.placeholder = t("One character or replacement prompt per line:\ncharacter A\ncharacter B");
   manual.addEventListener("input", () => {
     state.batchManualText = manual.value;
     saveState();
@@ -2559,16 +2489,16 @@ function renderBatchPanel() {
   const renderSelected = () => {
     selectedLoras.innerHTML = "";
     const hiddenCount = Math.max(0, state.batchLoraEntries.length - BATCH_SELECTION_PREVIEW_LIMIT);
-    if (hiddenCount) selectedLoras.append(el("div", "pwb-hint", `为保持页面稳定，前 ${hiddenCount} 项已折叠；下方显示最近 ${BATCH_SELECTION_PREVIEW_LIMIT} 项。完整群体数据仍会参与任务。`));
+    if (hiddenCount) selectedLoras.append(el("div", "pwb-hint", format("The first {0} entries are collapsed; the latest {1} are shown. All entries remain part of the batch.", [hiddenCount, BATCH_SELECTION_PREVIEW_LIMIT])));
     for (const selected of state.batchLoraEntries.slice(-BATCH_SELECTION_PREVIEW_LIMIT)) {
       const key = normalizeLoraKey(selected.key);
       const item = loraItems.find((candidate) => normalizeLoraKey(candidate.file) === key);
       const availableGroups = item ? groupsForLora(item) : [];
       const wantedIds = selected.groupIds?.length ? selected.groupIds : [selected.groupId].filter(Boolean);
       const groups = wantedIds.map((id) => availableGroups.find((candidate) => candidate.id === id)).filter(Boolean);
-      const label = item ? `${translatedLoraName(item.file, displayAliases())} / ${groups.map((group) => group.name).join(" + ") || selected.label || "\u9ed8\u8ba4\u7ec4"}` : key;
+      const label = item ? `${translatedLoraName(item.file, displayAliases())} / ${groups.map((group) => group.name).join(" + ") || selected.label || t("Default group")}` : key;
       const chip = el("div", "pwb-batch-entry");
-      const remove = button("移除", () => {
+      const remove = button(t("Remove"), () => {
         state.batchLoraEntries = state.batchLoraEntries.filter((entry) => entry.id !== selected.id);
         saveState();
         renderBatchPanel();
@@ -2577,7 +2507,7 @@ function renderBatchPanel() {
       chip.append(el("span", "pwb-batch-entry-label", label), remove);
       selectedLoras.append(chip);
     }
-    if (!state.batchLoraEntries.length) selectedLoras.append(el("span", "pwb-muted", "尚未从下方 LoRA 库选择人物。"));
+    if (!state.batchLoraEntries.length) selectedLoras.append(el("span", "pwb-muted", t("No characters selected from the LoRA library.")));
   };
   const summary = el("div", "pwb-batch-summary");
   const switchLabel = el("label", "pwb-batch-choice pwb-batch-switch");
@@ -2588,35 +2518,35 @@ function renderBatchPanel() {
     state.batchChangeLora = switchLora.checked;
     saveState();
   });
-  switchLabel.append(switchLora, el("span", "", "每个人物自动切换对应的 LoRA 模型"));
+  switchLabel.append(switchLora, el("span", "", t("Automatically switch the LoRA for each character")));
   let resumeBox;
   if (validBatchRun()) {
     const total = batchRunJobCount();
     const submitted = Object.values(batchRunProgress.jobs || {}).filter((job) => job?.promptId).length;
     const statusLabels = {
-      ready: "等待提交",
-      submitting: "提交时断开",
-      feeding: "稳定投喂中",
-      interrupted: "提交已中断",
-      paused: "已暂停投喂",
-      queued: "已提交，等待核对",
-      executing: "正在执行",
-      completed: "已全部完成",
+      ready: t("Ready"),
+      submitting: t("Submission disconnected"),
+      feeding: t("Feeding queue"),
+      interrupted: t("Submission interrupted"),
+      paused: t("Submission paused"),
+      queued: t("Queued"),
+      executing: t("Running"),
+      completed: t("Completed"),
     };
     resumeBox = el("div", "pwb-batch-resume-box");
-    const created = batchRunPlan.createdAt ? new Date(batchRunPlan.createdAt).toLocaleString() : "时间未知";
+    const created = batchRunPlan.createdAt ? new Date(batchRunPlan.createdAt).toLocaleString() : t("Unknown time");
     const resumeIndex = Math.max(0, Math.min(total, Number(batchRunProgress.resumeIndex || 0)));
     const position = batchRunProgress.status === "completed" ? total : Math.min(total, resumeIndex + 1);
     resumeBox.append(
-      el("div", "pwb-batch-resume-title", "上次群体任务"),
-      el("div", "pwb-hint", `${created} · ${statusLabels[batchRunProgress.status] || "可核对"} ${position} / ${total} · 已记录 ${submitted} 个任务 ID`),
+      el("div", "pwb-batch-resume-title", t("Previous batch")),
+      el("div", "pwb-hint", format("{0} · {1} {2} / {3} · {4} task IDs recorded", [created, statusLabels[batchRunProgress.status] || t("Ready to check"), position, total, submitted])),
     );
     if (batchRunProgress.lastError) resumeBox.append(el("div", "pwb-batch-resume-error", batchRunProgress.lastError));
     const actions = el("div", "pwb-batch-resume-actions");
     actions.append(
-      button(batchRunProgress.status === "completed" ? "核对上次群体任务" : `继续上次群体任务（从 ${position}）`, resumeBatchRun, "primary pwb-batch-resume"),
-      button("清除记录", () => {
-        if (confirm("只清除工作台的继续记录，不会取消 ComfyUI 中正在运行或排队的任务。确定吗？")) clearBatchRun();
+      button(batchRunProgress.status === "completed" ? t("Check previous batch") : format("Resume previous batch (from {0})", [position]), resumeBatchRun, "primary pwb-batch-resume"),
+      button(t("Clear record"), () => {
+        if (confirm(t("Clear the resume record only? Running and queued ComfyUI tasks will not be cancelled."))) clearBatchRun();
       }, "subtle danger"),
     );
     resumeBox.append(actions);
@@ -2626,13 +2556,13 @@ function renderBatchPanel() {
     positionInput.type = "number";
     positionInput.min = "1";
     positionInput.step = "1";
-    positionInput.placeholder = t("中断序号，例如 190");
+    positionInput.placeholder = t("Resume position, e.g. 190");
     const specifiedActions = el("div", "pwb-batch-resume-actions");
-    specifiedActions.append(positionInput, button("从该序号继续", () => resumeCurrentBatchFromPosition(positionInput.value), "primary"));
+    specifiedActions.append(positionInput, button(t("Resume from position"), () => resumeCurrentBatchFromPosition(positionInput.value), "primary"));
     resumeBox.append(
-      el("div", "pwb-batch-resume-title", "任务中断续接"),
-      el("div", "pwb-hint", "保留原来的模板、人物及画布节点选择。队列仍在时可自动识别；若已经重启导致队列消失，可直接填写中断序号。"),
-      button("从当前队列继续", adoptCurrentBatchRun, "primary pwb-batch-resume"),
+      el("div", "pwb-batch-resume-title", t("Resume interrupted batch")),
+      el("div", "pwb-hint", t("Keep your original templates, characters and canvas node selection. Existing queue entries can be detected; after a restart, enter a resume position manually.")),
+      button(t("Resume from current queue"), adoptCurrentBatchRun, "primary pwb-batch-resume"),
       specifiedActions,
     );
   }
@@ -2641,14 +2571,14 @@ function renderBatchPanel() {
     const entries = batchEntries().length;
     summary.textContent = currentLocale() === 'en'
       ? `${templates} templates × ${entries} characters = ${templates * entries} tasks`
-      : `${templates} 个模板 × ${entries} 个人物 = ${templates * entries} 个队列任务`;
+      : format("{0} templates × {1} characters = {2} queued tasks", [templates, entries, templates * entries]);
   }
-  batchRoot.append(presetBox, el("div", "pwb-label", "选择模板（箭头后是该模板的替换字段）"), templateList, el("div", "pwb-label", "已选 LoRA 人物"), selectedLoras, manual, switchLabel, el("div", "pwb-hint", "自动切换时，请同时选中提示词节点、人物 LoRA 节点和所有可用的固定 LoRA 节点。人物节点优先按标题中的“人物/角色/character”识别；固定节点按节点 ID 从小到大对应模板内顺序。每项任务只启用当前模板需要的数量，多余节点自动旁路；后续模板需要时会自动重新启用。"));
+  batchRoot.append(presetBox, el("div", "pwb-label", t("Templates (arrow shows the replacement field)")), templateList, el("div", "pwb-label", t("Selected LoRA characters")), selectedLoras, manual, switchLabel, el("div", "pwb-hint", t("Select the prompt, character LoRA and fixed LoRA nodes. Character nodes are identified by title; fixed nodes follow ascending node ID. Unused fixed loaders are bypassed and restored when needed.")));
   if (resumeBox) batchRoot.append(resumeBox);
   const runActions = el("div", "pwb-batch-run-actions");
-  const pauseButton = button(batchPauseRequested ? "正在暂停…" : "暂停投喂", pauseBatchSubmission, "pwb-batch-pause");
+  const pauseButton = button(batchPauseRequested ? t("Pausing…") : t("Pause submission"), pauseBatchSubmission, "pwb-batch-pause");
   pauseButton.disabled = !batchQueueRunning || batchPauseRequested;
-  const startButton = button("一键开始群体工作流", queueBatch, "primary pwb-batch-run");
+  const startButton = button(t("Start batch"), queueBatch, "primary pwb-batch-run");
   startButton.disabled = batchQueueRunning;
   runActions.append(startButton, pauseButton);
   batchRoot.append(summary, runActions);
@@ -2677,14 +2607,14 @@ function renderClipTextViewer() {
   const texts = rawClipTexts();
   for (const entry of texts) {
     const block = el("div", "pwb-prompt-block");
-    block.append(el("div", "pwb-prompt-label", `${entry.type} · 节点 ${entry.id} · 内容 ${entry.index + 1}`));
+    block.append(el("div", "pwb-prompt-label", format("{0} · Node {1} · Input {2}", [entry.type, entry.id, entry.index + 1])));
     const content = el("div", "pwb-prompt-text", entry.text);
-    content.title = "点击复制";
+    content.title = t("Click to copy");
     content.addEventListener("click", async () => navigator.clipboard.writeText(entry.text));
     block.append(content);
     clipTextRoot.append(block);
   }
-  if (!texts.length) clipTextRoot.append(el("div", "pwb-empty-inline", "当前工作流没有可读取的 CLIP 文字。载入含缺失 CLIP 节点的工作流后，原始文字会保留在这里。"));
+  if (!texts.length) clipTextRoot.append(el("div", "pwb-empty-inline", t("No readable CLIP text. Original text from missing CLIP nodes will appear here after loading a workflow.")));
 }
 
 function exposeMissingClipText(node) {
@@ -2697,7 +2627,7 @@ function exposeMissingClipText(node) {
     const area = el("textarea", "pwb-missing-clip-widget");
     area.value = text;
     area.readOnly = true;
-    node.addDOMWidget(`原始文字 ${index + 1}`, "pwb-missing-clip-text", area, { serialize: false });
+    node.addDOMWidget(format("Original text {0}", [index + 1]), "pwb-missing-clip-text", area, { serialize: false });
   }
   node.setSize?.([Math.max(node.size?.[0] || 260, 300), Math.max(node.size?.[1] || 120, 220)]);
 }
@@ -2706,7 +2636,7 @@ function buildPromptWorkbench(root, { renderLoras = true } = {}) {
   root.innerHTML = "";
   const archiveSection = el("section", "pwb-section pwb-character-archive");
   const archiveHeading = el("div", "pwb-section-heading");
-  archiveHeading.append(el("h3", "pwb-section-title", "输出资产人物归档"));
+  archiveHeading.append(el("h3", "pwb-section-title", t("Output character folders")));
   const archiveToggle = el("label", "pwb-fixed-label");
   const archiveCheckbox = el("input", "");
   archiveCheckbox.type = "checkbox";
@@ -2715,18 +2645,18 @@ function buildPromptWorkbench(root, { renderLoras = true } = {}) {
     state.autoCharacterFolders = archiveCheckbox.checked;
     saveState();
   });
-  archiveToggle.append(archiveCheckbox, document.createTextNode(t("以后自动分类")));
+  archiveToggle.append(archiveCheckbox, document.createTextNode(t("Automatically organize future output")));
   archiveHeading.append(archiveToggle);
   archiveSection.append(
     archiveHeading,
-    el("div", "pwb-hint", "按人物身份建立目录，同一人物的不同 LoRA 和服装会合并；多人物 LoRA 按实际选中的人物触发组拆分。无法可靠判断的资产进入“_未识别人物”。"),
-    button("整理现有 output", organizeExistingOutput, "primary pwb-organize-output")
+    el("div", "pwb-hint", t("Save future output in character folders. Different LoRAs and outfits for the same character share a folder; multi-character LoRAs use the selected character triggers. Unrecognized assets use the existing unknown-character folder.")),
+    el("div", "pwb-hint", t("Manage existing files with your operating system file manager."))
   );
   root.append(archiveSection);
 
   const selectedSection = el("section", "pwb-section");
   const selectedHeading = el("div", "pwb-section-heading");
-  selectedHeading.append(el("h3", "pwb-section-title", "已选择的完整内容"), button("清空", () => {
+  selectedHeading.append(el("h3", "pwb-section-title", t("Selected content")), button(t("Clear"), () => {
     state.selections = [];
     saveState();
     renderSelections();
@@ -2738,44 +2668,44 @@ function buildPromptWorkbench(root, { renderLoras = true } = {}) {
   const separator = el("input", "pwb-input pwb-separator");
   separator.value = state.separator;
   separator.addEventListener("input", () => { state.separator = separator.value; saveState(); renderSelections(); });
-  separatorRow.append(el("span", "pwb-muted", "块之间分隔符"), separator);
+  separatorRow.append(el("span", "pwb-muted", t("Separator between blocks")), separator);
   const actions = el("div", "pwb-actions wrap");
-  actions.append(button("复制", async () => { await navigator.clipboard.writeText(assembledText()); toast("已复制", "完整提示词已复制。", "success"); }), button("写入选中节点", writeToSelectedNode, "primary"));
-  selectedSection.append(selectedHeading, selectionsRoot, el("label", "pwb-label", "最终输出"), outputArea, separatorRow, actions);
+  actions.append(button(t("Copy"), async () => { await navigator.clipboard.writeText(assembledText()); toast(t("Copied"), t("The complete prompt was copied."), "success"); }), button(t("Write to selected node"), writeToSelectedNode, "primary"));
+  selectedSection.append(selectedHeading, selectionsRoot, el("label", "pwb-label", t("Final output")), outputArea, separatorRow, actions);
   root.append(selectedSection);
 
   const manualSection = el("section", "pwb-section");
-  manualSection.append(el("h3", "pwb-section-title", "手工完整提示词"));
+  manualSection.append(el("h3", "pwb-section-title", t("Manual complete prompt")));
   const manual = el("textarea", "pwb-output pwb-manual");
-  manual.placeholder = t("在这里填写一段完整提示词；加入后会作为一个整体显示在上方。");
-  manualSection.append(manual, button("作为完整提示词加入", () => {
-    addSelection("prompt", "手工提示词", manual.value);
+  manual.placeholder = t("Enter a complete prompt. It will appear above as a single selection.");
+  manualSection.append(manual, button(t("Add as complete prompt"), () => {
+    addSelection("prompt", t("Manual prompt"), manual.value);
     if (manual.value.trim()) manual.value = "";
   }, "primary"));
   root.append(manualSection);
 
   const templateSection = el("section", "pwb-section");
-  templateSection.append(el("h3", "pwb-section-title", "可命名模板"));
+  templateSection.append(el("h3", "pwb-section-title", t("Named templates")));
   templateRoot = el("div", "pwb-template-editor");
   templateSection.append(templateRoot);
   root.append(templateSection);
 
   const batchSection = el("section", "pwb-section");
-  batchSection.append(el("h3", "pwb-section-title", "群体工作流"), el("div", "pwb-hint", "先在画布选中提示词节点、人物 LoRA 节点及所需数量的固定 LoRA 节点。支持一个人物跑多个模板、一个模板跑多个人物；两边多选时会生成全部组合。队列会逐项执行。"));
+  batchSection.append(el("h3", "pwb-section-title", t("Batch workflow")), el("div", "pwb-hint", t("Select the prompt node, character LoRA node and enough fixed LoRA nodes on the canvas. Every selected character is combined with every selected template.")));
   batchRoot = el("div", "pwb-batch");
   batchSection.append(batchRoot);
   root.append(batchSection);
 
   const clipSection = el("section", "pwb-section");
-  clipSection.append(el("h3", "pwb-section-title", "CLIP 节点原始文字"), el("div", "pwb-hint", "即使当前版本缺少对应 CLIP 节点，也从工作流原始数据中显示文字；这不代表缺失节点可以执行。"));
+  clipSection.append(el("h3", "pwb-section-title", t("Original CLIP node text")), el("div", "pwb-hint", t("View text stored in the workflow even when its CLIP node is missing. Missing nodes still cannot execute.")));
   clipTextRoot = el("div", "pwb-clip-texts");
   clipSection.append(clipTextRoot);
   root.append(clipSection);
 
   const loraSection = el("section", "pwb-section");
   const loraHeading = el("div", "pwb-section-heading");
-  loraHeading.append(el("h3", "pwb-section-title", "LoRA 中文库"));
-  const refreshLoras = button("\u5237\u65b0 LoRA", async () => {
+  loraHeading.append(el("h3", "pwb-section-title", t("LoRA library")));
+  const refreshLoras = button(t("Refresh LoRAs"), async () => {
     refreshLoras.disabled = true;
     try {
       await api.fetchApi("/lora-trigger-helper/scan", {
@@ -2786,7 +2716,7 @@ function buildPromptWorkbench(root, { renderLoras = true } = {}) {
       loraLoaded = false;
       loraItems = [];
       await renderLoraLibrary();
-      toast("LoRA \u5df2\u5237\u65b0", `\u5f53\u524d ${loraItems.length} \u4e2a\u6587\u4ef6`, "success");
+      toast(t("LoRAs refreshed"), format("{0} files available", [loraItems.length]), "success");
     } finally {
       refreshLoras.disabled = false;
     }
@@ -2796,43 +2726,43 @@ function buildPromptWorkbench(root, { renderLoras = true } = {}) {
   checkbox.type = "checkbox";
   checkbox.checked = workflowOnly;
   checkbox.addEventListener("change", () => { workflowOnly = checkbox.checked; renderLoraLibrary(); });
-  currentOnly.append(checkbox, document.createTextNode("只看当前工作流"));
+  currentOnly.append(checkbox, document.createTextNode(t("Current workflow only")));
   loraHeading.append(refreshLoras, currentOnly);
   loraSearch = el("input", "pwb-input");
-  loraSearch.placeholder = t("可用中文、英文、文件名或触发词搜索…");
+  loraSearch.placeholder = t("Search aliases, filenames or trigger words…");
   loraSearch.addEventListener("input", () => {
     clearTimeout(loraSearchTimer);
     loraSearchTimer = setTimeout(renderLoraLibrary, 180);
   });
   loraModelSelect = el("select", "pwb-input pwb-model-filter");
-  loraModelSelect.title = "按 LoRA 对应的基础模型筛选";
-  loraModelSelect.append(new Option("全部模型", ""));
+  loraModelSelect.title = t("Filter by the LoRA base model");
+  loraModelSelect.append(new Option(t("All models"), ""));
   loraModelSelect.addEventListener("change", renderLoraLibrary);
   const loraFilters = el("div", "pwb-lora-filters");
   loraFilters.append(loraSearch, loraModelSelect);
   loraRoot = el("div", "pwb-lora-list merged");
-  loraSection.append(loraHeading, loraFilters, el("div", "pwb-hint", "中文仅用于显示和搜索，工作流仍保存原始 LoRA 文件名。可按底模筛选，并为任意 LoRA 自定义中文别名。"), loraRoot);
+  loraSection.append(loraHeading, loraFilters, el("div", "pwb-hint", t("Aliases are used for display and search. Workflows retain original filenames. Filter by base model or customize an alias.")), loraRoot);
   root.append(loraSection);
 
   const sectionLinks = [
-    [archiveSection, "归档", "自动整理输出"],
-    [selectedSection, "组合", "整理最终提示词"],
-    [manualSection, "手工", "加入完整提示词"],
-    [templateSection, "模板", "管理可变字段"],
-    [batchSection, "群体", "批量生成组合"],
-    [clipSection, "CLIP", "查看节点原文"],
-    [loraSection, "LoRA", "浏览人物与服装"],
+    [archiveSection, t("Archive"), t("Organize output")],
+    [selectedSection, t("Compose"), t("Compose final prompt")],
+    [manualSection, t("Manual"), t("Add complete prompt")],
+    [templateSection, t("Templates"), t("Manage variable fields")],
+    [batchSection, t("Batch"), t("Generate combinations")],
+    [clipSection, "CLIP", t("Read original node text")],
+    [loraSection, "LoRA", t("Browse characters and outfits")],
   ];
   const hero = el("header", "pwb-workbench-hero");
   const heroText = el("div", "pwb-workbench-hero-text");
   heroText.append(
     el("span", "pwb-eyebrow", "PROMPT CONTROL CENTER"),
-    el("h2", "pwb-workbench-title", "提示词工作台"),
-    el("p", "pwb-workbench-subtitle", "组合提示词、管理人物 LoRA，并批量运行模板。")
+    el("h2", "pwb-workbench-title", t("Prompt Workbench")),
+    el("p", "pwb-workbench-subtitle", t("Compose prompts, manage character LoRAs and run templates in batches."))
   );
-  hero.append(heroText, el("span", "pwb-workbench-status", "已连接"));
+  hero.append(heroText, el("span", "pwb-workbench-status", t("Connected")));
   const nav = el("nav", "pwb-section-nav");
-  nav.setAttribute("aria-label", t("工作台功能区"));
+  nav.setAttribute("aria-label", t("Workbench sections"));
   for (const [section, label, description] of sectionLinks) {
     const anchor = button(label, () => section.scrollIntoView({ behavior: "smooth", block: "start" }), "section-link");
     anchor.title = description;
@@ -2844,7 +2774,7 @@ function buildPromptWorkbench(root, { renderLoras = true } = {}) {
   renderTemplates();
   renderBatchPanel();
   renderClipTextViewer();
-  loraRoot.replaceChildren(el("div", "pwb-hint", currentLocale() === 'en' ? 'Loading LoRA library…' : '正在读取 LoRA 库…'));
+  loraRoot.replaceChildren(el("div", "pwb-hint", currentLocale() === 'en' ? 'Loading LoRA library…' : t("Loading LoRA library…")));
   if (renderLoras) renderLoraLibrary();
 }
 
@@ -2857,7 +2787,7 @@ function buildSidebar(root) {
   const shellHeader = el("header", "pwb-shell-header");
   const brand = el("div", "pwb-brand");
   const brandText = el("div", "pwb-brand-text");
-  brandText.append(el("strong", "", "Prompt Workbench"), el("span", "", "任务与提示词控制台"));
+  brandText.append(el("strong", "", "Prompt Workbench"), el("span", "", t("Tasks and prompt tools")));
   brand.append(el("span", "pwb-brand-mark", "P"), brandText, el("span", "pwb-live-dot", "LOCAL"));
   const body = el("div", "pwb-body");
   queueRoot = el("div", "pwb-view");
@@ -2871,23 +2801,24 @@ function buildSidebar(root) {
     if (tab === "queue") renderQueue();
     if (tab === "prompt" && !promptRoot.childNodes.length) buildPromptWorkbench(promptRoot);
   };
-  const queueTab = button("任务队列", () => switchTab("queue"), "tab");
+  const queueTab = button(t("Task queue"), () => switchTab("queue"), "tab");
   queueTab.dataset.tab = "queue";
-  const promptTab = button("提示词 / LoRA", () => switchTab("prompt"), "tab");
+  const promptTab = button(t("Prompts / LoRA"), () => switchTab("prompt"), "tab");
   promptTab.dataset.tab = "prompt";
   tabs.append(queueTab, promptTab);
   shellHeader.append(brand, tabs);
   const settings = el('div', 'pwb-settings');
   const language = el('select', 'pwb-input');
-  language.setAttribute('aria-label', t('语言'));
-  for (const [value, name] of [['zh-CN', '简体中文'], ['en', 'English']]) language.append(new Option(name, value));
-  language.value = currentLocale();
+  language.setAttribute('aria-label', t("Language"));
+  for (const [value, name] of [['auto', t('Follow ComfyUI')], ['en', 'English'], ['zh-CN', '简体中文']]) language.append(new Option(name, value));
+  language.value = storage.getItem(LOCALE_KEY) || 'auto';
   language.addEventListener('change', () => {
     if (batchQueueRunning) {
       language.value = currentLocale();
-      return toast('群体任务正在提交', '请等待当前批次提交完成。', 'warn');
+      return toast(t("Batch is submitting"), t("Wait for the current submission to finish."), 'warn');
     }
     storage.setItem(LOCALE_KEY, language.value);
+    loraLoaded = false;
     buildSidebar(root);
   });
   const importFile = el('input', '');
@@ -2900,18 +2831,18 @@ function buildSidebar(root) {
     try {
       if (file.size > 10 * 1024 * 1024) throw new Error('Backup exceeds 10 MB.');
       const incoming = validateBackup(JSON.parse(await file.text()));
-      if (!confirm('导入备份将替换当前模板与选择，继续吗？')) return;
+      if (!confirm(t("Import replaces current templates and selections. Continue? A backup of your current state will be downloaded."))) return;
       downloadBackup(state);
       if (!storage.setItem(STORAGE_KEY, JSON.stringify(incoming))) throw new Error('Browser storage is unavailable.');
       state = loadState();
       activeTemplateId = state.templates[0]?.id;
       activeFieldId = templateFillField(state.templates[0])?.id;
       buildSidebar(root);
-    } catch (error) { toast('导入失败', error.message, 'error'); }
+    } catch (error) { toast(t("Import failed"), error.message, 'error'); }
     importFile.value = '';
   });
-  settings.append(language, button('导出备份', () => downloadBackup(state)), button('导入备份', () => {
-    if (batchQueueRunning) return toast('群体任务正在提交', '请等待当前批次提交完成。', 'warn');
+  settings.append(language, button(t("Export backup"), () => downloadBackup(state)), button(t("Import backup"), () => {
+    if (batchQueueRunning) return toast(t("Batch is submitting"), t("Wait for the current submission to finish."), 'warn');
     importFile.click();
   }), importFile);
   shellHeader.append(settings);
@@ -2934,7 +2865,7 @@ function installSidebarResizer(root) {
   applyWidth(savedWidth >= 340 ? savedWidth : 420);
 
   const handle = el("div", "pwb-resize-handle");
-  handle.title = "\u62d6\u62fd\u8c03\u6574\u5de5\u4f5c\u53f0\u5bbd\u5ea6\uff1b\u53cc\u51fb\u6062\u590d\u9ed8\u8ba4";
+  handle.title = t("Drag to resize the workbench; double-click to reset");
   const updateEdge = () => handle.classList.toggle("left-edge", sidebar.getBoundingClientRect().left > window.innerWidth / 2);
   updateEdge();
   handle.addEventListener("pointerdown", (event) => {
@@ -2963,7 +2894,15 @@ function installSidebarResizer(root) {
 
 app.registerExtension({
   name: "PromptWorkbench.Sidebar",
-  init() {
+  async init() {
+    await initializeI18n(api.fetchApi.bind(api), () => app.ui.settings.getSettingValue('Comfy.Locale', 'en'));
+    app.ui.settings.addEventListener?.('Comfy.Locale.change', () => {
+      const root = queueRoot?.closest('.pwb-root');
+      if (root && !batchQueueRunning && (!storage.getItem(LOCALE_KEY) || storage.getItem(LOCALE_KEY) === 'auto')) {
+        loraLoaded = false;
+        buildSidebar(root);
+      }
+    });
     ensureStyles();
     installCharacterArchiveQueueHook();
     installBatchProgressTracking();
@@ -2975,8 +2914,8 @@ app.registerExtension({
     app.extensionManager.registerSidebarTab({
       id: "prompt-workbench",
       icon: "pi pi-th-large",
-      title: t("提示词工作台"),
-      tooltip: "队列透视、可变模板、LoRA 中文浏览与完整提示词组合",
+      title: t("Prompt Workbench"),
+      tooltip: t("Inspect queues, edit templates, browse LoRAs and compose prompts"),
       type: "custom",
       render(root) {
         buildSidebar(root);

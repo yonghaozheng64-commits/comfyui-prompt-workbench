@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import * as batch from '../web/batch.js';
+import { format } from '../web/i18n.js';
 
 function harness() {
   const initial = { templates: [], batchPresets: [], batchLoraEntries: [], batchTemplateIds: [], batchManualText: '', batchChangeLora: true, separator: ', ' };
   const widget = { value: 'original' };
   const target = { widget, node: {} };
   const context = vm.createContext({
-    ...batch, loadState: () => initial, clone: structuredClone, uid: () => 'test-id',
+    ...batch, format, loadState: () => initial, clone: structuredClone, uid: () => 'test-id',
     storage: { getItem: () => null, setItem: () => true, removeItem() {} },
     t: x => x, prompt: () => 'saved', confirm: () => true, LOCALE_KEY: 'locale', currentLocale: () => 'en',
     window: { addEventListener() {} }, document: { querySelector: () => null },

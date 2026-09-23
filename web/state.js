@@ -1,3 +1,4 @@
+import { t } from './i18n.js';
 import { storage } from './storage.js';
 const STORAGE_KEY = 'prompt-workbench-state-v2';
 const OLD_STORAGE_KEY = 'prompt-workbench-state-v1';
@@ -5,36 +6,36 @@ const OLD_STORAGE_KEY = 'prompt-workbench-state-v1';
 export const DEFAULT_TEMPLATES = [
   {
     id: "portrait",
-    name: "人物肖像",
+    name: t("Character portrait"),
     fields: [
-      { id: "quality", name: "质量", value: "masterpiece, best quality, highly detailed", fixed: true },
-      { id: "character", name: "人物 / LoRA", value: "", fixed: false },
-      { id: "appearance", name: "外貌与服装", value: "", fixed: false },
-      { id: "action", name: "动作与表情", value: "", fixed: false },
-      { id: "scene", name: "场景", value: "", fixed: false },
-      { id: "lighting", name: "光线", value: "cinematic lighting", fixed: true },
+      { id: "quality", name: t("Quality"), value: "masterpiece, best quality, highly detailed", fixed: true },
+      { id: "character", name: t("Character / LoRA"), value: "", fixed: false },
+      { id: "appearance", name: t("Appearance and outfit"), value: "", fixed: false },
+      { id: "action", name: t("Action and expression"), value: "", fixed: false },
+      { id: "scene", name: t("Scene"), value: "", fixed: false },
+      { id: "lighting", name: t("Lighting"), value: "cinematic lighting", fixed: true },
     ],
   },
   {
     id: "scene",
-    name: "场景概念图",
+    name: t("Scene concept"),
     fields: [
-      { id: "quality", name: "质量", value: "highly detailed, cinematic composition", fixed: true },
-      { id: "subject", name: "核心场景", value: "", fixed: false },
-      { id: "environment", name: "环境细节", value: "", fixed: false },
-      { id: "weather", name: "时间与天气", value: "", fixed: false },
-      { id: "style", name: "风格 / LoRA", value: "", fixed: false },
+      { id: "quality", name: t("Quality"), value: "highly detailed, cinematic composition", fixed: true },
+      { id: "subject", name: t("Main scene"), value: "", fixed: false },
+      { id: "environment", name: t("Environment details"), value: "", fixed: false },
+      { id: "weather", name: t("Time and weather"), value: "", fixed: false },
+      { id: "style", name: t("Style / LoRA"), value: "", fixed: false },
     ],
   },
   {
     id: "video",
-    name: "视频镜头",
+    name: t("Video shot"),
     fields: [
-      { id: "quality", name: "稳定性", value: "smooth motion, temporal consistency, stable details", fixed: true },
-      { id: "subject", name: "主体 / LoRA", value: "", fixed: false },
-      { id: "action", name: "动作过程", value: "", fixed: false },
-      { id: "camera", name: "机位与运镜", value: "", fixed: false },
-      { id: "atmosphere", name: "光线与氛围", value: "", fixed: false },
+      { id: "quality", name: t("Stability"), value: "smooth motion, temporal consistency, stable details", fixed: true },
+      { id: "subject", name: t("Subject / LoRA"), value: "", fixed: false },
+      { id: "action", name: t("Action sequence"), value: "", fixed: false },
+      { id: "camera", name: t("Camera and movement"), value: "", fixed: false },
+      { id: "atmosphere", name: t("Lighting and atmosphere"), value: "", fixed: false },
     ],
   },
 ];
@@ -71,11 +72,11 @@ export function loadState() {
     const old = JSON.parse(storage.getItem(OLD_STORAGE_KEY));
     const separator = typeof old?.separator === "string" ? old.separator : ", ";
     const oldAssembly = Array.isArray(old?.assembly) ? old.assembly.map((item) => String(item.text || "").trim()).filter(Boolean) : [];
-    if (oldAssembly.length) migrated.selections.push({ id: uid(), type: "prompt", label: "旧版组合提示词", text: oldAssembly.join(separator) });
+    if (oldAssembly.length) migrated.selections.push({ id: uid(), type: "prompt", label: t("Legacy combined prompt"), text: oldAssembly.join(separator) });
     const customFields = (Array.isArray(old?.components) ? old.components : [])
       .filter((item) => item?.source === "user" && item.text)
-      .map((item) => ({ id: uid(), name: item.label || "旧版自定义内容", value: item.text, fixed: false }));
-    if (customFields.length) migrated.templates.push({ id: uid(), name: "旧版自定义词库", fields: customFields });
+      .map((item) => ({ id: uid(), name: item.label || t("Legacy custom content"), value: item.text, fixed: false }));
+    if (customFields.length) migrated.templates.push({ id: uid(), name: t("Legacy custom vocabulary"), fields: customFields });
     migrated.separator = separator;
     storage.setItem(STORAGE_KEY, JSON.stringify(migrated));
   } catch {}

@@ -26,7 +26,9 @@ Both repositories have been submitted to the Manager catalog in [PR #3266](https
 
 ## Languages and storage
 
-The language selector supports Simplified Chinese and English, initially following the browser. UI translation lives in `web/i18n.js`; unknown/legacy strings fall back to their source. User-authored prompts, model names and trigger words are preserved.
+UI source text and the fallback language are English. The language selector defaults to **Follow ComfyUI** (`Comfy.Locale`), with English and Simplified Chinese overrides. Catalogs live in `locales/en/main.json` and `locales/zh/main.json` under the `promptWorkbench` namespace and are loaded through ComfyUI's standard `/i18n` endpoint. Older hosts without that endpoint retain the English interface. Unsupported languages fall back to English. User-authored prompts, model aliases, filenames and trigger words are preserved.
+
+For file safety, the browser no longer offers model deletion or movement of existing output files. Use the operating system file manager instead. Future-output character prefixes remain available. Update the companion helper **and restart ComfyUI** to unload its old destructive HTTP routes; a browser refresh alone is insufficient.
 
 Data remains in browser storage using existing v1/v2 keys. Storage failure falls back to memory and displays a warning: export before closing the page. Changing browser/profile/origin does not automatically transfer settings.
 

@@ -19,7 +19,7 @@ test('disabled storage keeps the newest state instead of returning stale data', 
 test('locale matching and unknown content preserve original prompts', () => {
   assert.equal(resolveLocale('auto', 'zh-TW'), 'zh-CN');
   assert.equal(resolveLocale('auto', 'fr-FR'), 'en');
-  assert.equal(t('保存当前', 'en'), 'Save current');
+  assert.equal(t('Save current', 'en'), 'Save current');
   assert.equal(t('my exact trigger, character X', 'en'), 'my exact trigger, character X');
 });
 
